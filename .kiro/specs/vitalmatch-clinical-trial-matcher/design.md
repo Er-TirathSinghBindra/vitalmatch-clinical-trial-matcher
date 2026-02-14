@@ -7,26 +7,133 @@ VitalMatch uses a hybrid architecture combining SQL-based hard filtering with AI
 
 ### AWS Architecture Diagram
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
-│   CloudFront    │───▶│   API Gateway    │───▶│   Lambda Functions│
-│   (Web UI)      │    │   (REST API)     │    │   (Filter Engine) │
-└─────────────────┘    └──────────────────┘    └─────────────────┘
-                              │                          │
-                              ▼                          ▼
-                       ┌──────────────────┐    ┌─────────────────┐
-                       │   S3 Bucket      │    │   RDS PostgreSQL│
-                       │   (Static Web)   │    │   (Trial Data)  │
-                       └──────────────────┘    └─────────────────┘
-                                                         ▲
-                                                         │
-                                                ┌─────────────────┐
-                                                │  EventBridge +  │
-                                                │  Lambda Cron    │
-                                                │ (Data Ingestion)│
-                                                └─────────────────┘
+┌─────────────────────────────────────────────────────────────────────┐
+│                          AWS Cloud                                  │
+│                                                                     │
+│  ┌──────────────┐         ┌─────────────────────────────────────┐ │
+│  │  AWS WAF     │────────▶│         CloudFront                  │ │
+│  │ (Firewall)   │         │      (Edge Protection)              │ │
+│  └──────────────┘         └─────────────────────────────────────┘ │
+│         │                              │                           │
+│         │                              ▼                           │
+│         │                    ┌──────────────────┐                 │
+│         │                    │   S3 Bucket      │                 │
+│         │                    │  (Static Web)    │                 │
+│         │                    └──────────────────┘                 │
+│         │                                                          │
+│         ▼                                                          │
+│  ┌──────────────┐                                                 │
+│  │ API Gateway  │                                                 │
+│  │  (REST API)  │                                                 │
+│  └──────────────┘                                                 │
+│         │                                                          │
+│         │                                                          │
+│  ┌──────▼──────────────────────────────────────────────────────┐ │
+│  │                        VPC                                   │ │
+│  │                                                              │ │
+│  │  ┌────────────────────────────────────────────────────────┐ │ │
+│  │  │              Private Subnet                            │ │ │
+│  │  │                                                        │ │ │
+│  │  │  ┌─────────────────────┐    ┌────────────────────┐   │ │ │
+│  │  │  │  Lambda Function    │    │  Security Group    │   │ │ │
+│  │  │  │  Filter Engine &    │◀───│  (RDS Access)      │   │ │ │
+│  │  │  │  Match Logic        │    └────────────────────┘   │ │ │
+│  │  │  └─────────────────────┘              │              │ │ │
+│  │  │            │                           ▼              │ │ │
+│  │  │            │                  ┌────────────────────┐ │ │ │
+│  │  │            │                  │  RDS PostgreSQL    │ │ │ │
+│  │  │            │                  │  (Trial Data)      │ │ │ │
+│  │  │            │                  └────────────────────┘ │ │ │
+│  │  │            │                           ▲              │ │ │
+│  │  │            │                           │              │ │ │
+│  │  │  ┌─────────▼───────────┐              │              │ │ │
+│  │  │  │  Lambda Function    │              │              │ │ │
+│  │  │  │  Data Ingestion     │──────────────┘              │ │ │
+│  │  │  └─────────────────────┘                             │ │ │
+│  │  │            ▲                                          │ │ │
+│  │  └────────────┼──────────────────────────────────────────┘ │ │
+│  │               │                                            │ │
+│  └───────────────┼────────────────────────────────────────────┘ │
+│                  │                                              │
+│         ┌────────┴────────┐                                     │
+│         │  EventBridge    │                                     │
+│         │  (Cron Schedule)│                                     │
+│         └─────────────────┘                                     │
+│                  │                                              │
+│                  └──────────────────────────────────────────────┼──▶
+│                                                                 │   ClinicalTrials.gov
+└─────────────────────────────────────────────────────────────────┘   API
 ```
 
 ## AWS Component Design
+
+### 0. Network Architecture - VPC Configuration
+**Purpose**: Secure network isolation for Lambda functions and RDS database
+
+**AWS Services**:
+- **VPC**: Isolated virtual network for all backend resources
+- **Private Subnets**: Host Lambda functions and RDS instances
+- **Security Groups**: Firewall rules controlling resource access
+- **NAT Gateway**: Outbound internet access for Lambda functions (for ClinicalTrials.gov API)
+- **VPC Flow Logs**: Network traffic monitoring and audit
+
+**VPC Configuration**:
+```yaml
+VPC:
+  CIDR: 10.0.0.0/16
+  
+Private Subnets:
+  - Subnet A: 10.0.1.0/24 (AZ: us-east-1a)
+  - Subnet B: 10.0.2.0/24 (AZ: us-east-1b)
+  
+Security Groups:
+  Lambda-SG:
+    Inbound: None (Lambda doesn't accept inbound)
+    Outbound:
+      - RDS-SG on port 5432 (PostgreSQL)
+      - 0.0.0.0/0 on port 443 (HTTPS for external APIs)
+  
+  RDS-SG:
+    Inbound:
+      - Lambda-SG on port 5432
+    Outbound: None
+    
+NAT Gateway:
+  - Deployed in public subnet for Lambda outbound internet access
+  - Required for ClinicalTrials.gov API calls
+```
+
+**Security Considerations**:
+- Lambda functions have no public IP addresses
+- RDS database is not publicly accessible
+- All traffic between Lambda and RDS stays within VPC
+- VPC Flow Logs capture all network traffic for audit
+
+### 0.5. Security Layer - AWS WAF
+**Purpose**: Protect CloudFront and API Gateway from common web attacks
+
+**AWS Services**:
+- **AWS WAF**: Web Application Firewall with managed and custom rules
+- **AWS Shield Standard**: DDoS protection (included by default)
+
+**WAF Configuration**:
+```yaml
+WAF Rules:
+  - AWS Managed Rules - Core Rule Set (CRS)
+  - AWS Managed Rules - Known Bad Inputs
+  - SQL Injection Protection
+  - Cross-Site Scripting (XSS) Protection
+  - Rate Limiting: 2000 requests per 5 minutes per IP
+  - Geographic Restrictions: Optional (if needed)
+  
+WAF Associations:
+  - CloudFront Distribution (edge protection)
+  - API Gateway (API protection)
+  
+Logging:
+  - All blocked requests logged to CloudWatch
+  - Alerts sent via SNS for suspicious patterns
+```
 
 ### 1. Frontend - S3 + CloudFront
 **Purpose**: Host static React web application with global CDN
@@ -57,6 +164,20 @@ CloudFront Distribution:
 - **API Gateway**: REST API endpoints with throttling
 - **Lambda Functions**: Serverless compute for business logic
 - **Lambda Layers**: Shared libraries (NLP models, utilities)
+- **VPC Integration**: Lambda functions deployed in VPC private subnet
+
+**API Gateway Configuration**:
+```yaml
+API Gateway:
+  Type: REST API
+  Throttling:
+    Rate Limit: 1000 requests/second
+    Burst Limit: 2000 requests
+  CORS: Enabled for web application
+  Authorization: API Key (optional for public access)
+  Logging: Full request/response logging to CloudWatch
+  WAF: Protected by AWS WAF rules
+```
 
 **Lambda Functions**:
 ```python
@@ -82,6 +203,20 @@ def lambda_ingest_trials(event, context):
     store_in_rds(trials_data)
 ```
 
+**Lambda VPC Configuration**:
+```yaml
+Lambda Configuration:
+  VPC: Main VPC
+  Subnets: Private Subnets A & B
+  Security Group: Lambda-SG
+  Memory: 1024 MB (matching engine), 512 MB (ingestion)
+  Timeout: 30 seconds (matching), 300 seconds (ingestion)
+  Environment Variables:
+    - RDS_ENDPOINT: From Parameter Store
+    - DB_NAME: trials_db
+    - BEDROCK_MODEL_ID: anthropic.claude-3-sonnet
+```
+
 ### 3. Database - RDS PostgreSQL
 **Purpose**: Managed relational database for structured trial data
 
@@ -89,6 +224,26 @@ def lambda_ingest_trials(event, context):
 - **RDS PostgreSQL**: Managed database with automated backups
 - **RDS Proxy**: Connection pooling for Lambda functions
 - **Parameter Store**: Database credentials management
+- **VPC Deployment**: Database in private subnet with security group protection
+
+**RDS Configuration**:
+```yaml
+RDS Instance:
+  Engine: PostgreSQL 15
+  Instance Class: db.t3.medium (production), db.t3.micro (dev)
+  Storage: 100 GB SSD with auto-scaling enabled
+  Multi-AZ: Enabled for high availability
+  Backup: Automated daily backups, 7-day retention
+  Encryption: Enabled using AWS KMS
+  VPC: Private subnet deployment
+  Security Group: RDS-SG (only Lambda access)
+  
+RDS Proxy:
+  Purpose: Connection pooling for Lambda functions
+  Max Connections: 100
+  Idle Timeout: 30 minutes
+  Authentication: IAM-based from Lambda
+```
 
 **Database Schema** (Updated for AWS):
 ```sql
@@ -154,14 +309,113 @@ def process_medical_text_with_bedrock(patient_history, trial_criteria):
 - **EventBridge**: Scheduled triggers (daily/weekly)
 - **Lambda**: Data fetching and processing
 - **Systems Manager Parameter Store**: API keys and configuration
+- **SNS**: Error notifications for failed ingestion
 
-**Ingestion Flow**:
+**EventBridge Configuration**:
+```yaml
+EventBridge Rule:
+  Name: DailyTrialDataIngestion
+  Schedule: cron(0 2 * * ? *)  # Daily at 2 AM UTC
+  Target: Data Ingestion Lambda Function
+  Retry Policy: 3 attempts with exponential backoff
+```
+
+**Data Ingestion Flow**:
 ```python
-def scheduled_data_ingestion():
-    # Triggered by EventBridge rule
-    # Fetch from ClinicalTrials.gov API
-    # Process and store in RDS
-    # Send notifications via SNS if errors
+import boto3
+import requests
+from datetime import datetime, timedelta
+
+def lambda_ingest_trials(event, context):
+    """
+    Scheduled data ingestion from ClinicalTrials.gov API
+    """
+    sns = boto3.client('sns')
+    
+    try:
+        # Fetch recent trials from ClinicalTrials.gov
+        trials_data = fetch_clinicaltrials_api()
+        
+        # Parse and normalize data
+        normalized_trials = parse_trial_data(trials_data)
+        
+        # Store in RDS via connection pool
+        store_in_rds(normalized_trials)
+        
+        # Log success metrics
+        log_ingestion_metrics(len(normalized_trials))
+        
+        return {
+            'statusCode': 200,
+            'message': f'Successfully ingested {len(normalized_trials)} trials'
+        }
+        
+    except Exception as e:
+        # Send SNS alert on failure
+        sns.publish(
+            TopicArn=os.environ['SNS_ALERT_TOPIC'],
+            Subject='Trial Data Ingestion Failed',
+            Message=f'Error: {str(e)}'
+        )
+        raise
+
+def fetch_clinicaltrials_api():
+    """
+    Fetch trials from ClinicalTrials.gov API with rate limiting
+    """
+    base_url = "https://clinicaltrials.gov/api/v2/studies"
+    
+    # Fetch trials updated in last 24 hours
+    params = {
+        'query.term': 'AREA[LastUpdatePostDate]RANGE[MIN,MAX]',
+        'pageSize': 1000,
+        'format': 'json'
+    }
+    
+    response = requests.get(base_url, params=params, timeout=30)
+    response.raise_for_status()
+    
+    return response.json()
+
+def parse_trial_data(raw_data):
+    """
+    Parse and normalize trial data from API response
+    """
+    trials = []
+    
+    for study in raw_data.get('studies', []):
+        trial = {
+            'id': study['protocolSection']['identificationModule']['nctId'],
+            'title': study['protocolSection']['identificationModule']['officialTitle'],
+            'condition': extract_conditions(study),
+            'min_age': extract_min_age(study),
+            'max_age': extract_max_age(study),
+            'gender_criteria': extract_gender(study),
+            'location': extract_locations(study),
+            'inclusion_text': extract_inclusion_criteria(study),
+            'exclusion_text': extract_exclusion_criteria(study)
+        }
+        trials.append(trial)
+    
+    return trials
+```
+
+**ClinicalTrials.gov API Integration**:
+```yaml
+API Details:
+  Base URL: https://clinicaltrials.gov/api/v2/studies
+  Authentication: None (public API)
+  Rate Limits: 
+    - 1000 requests per hour
+    - Implement exponential backoff
+  Response Format: JSON or XML
+  Pagination: 1000 records per page
+  
+Error Handling:
+  - Retry failed requests 3 times with exponential backoff
+  - Log all API errors to CloudWatch
+  - Send SNS alerts for persistent failures
+  - Continue processing successful records even if some fail
 ```
 
 ### 6. Monitoring and Logging
@@ -169,6 +423,55 @@ def scheduled_data_ingestion():
 - **CloudWatch**: Metrics, logs, and alarms
 - **X-Ray**: Distributed tracing for Lambda functions
 - **SNS**: Error notifications and alerts
+- **VPC Flow Logs**: Network traffic monitoring
+
+**CloudWatch Configuration**:
+```yaml
+CloudWatch Metrics:
+  Lambda Metrics:
+    - Invocation count
+    - Duration
+    - Error rate
+    - Concurrent executions
+    - Throttles
+  
+  RDS Metrics:
+    - CPU utilization
+    - Database connections
+    - Read/Write IOPS
+    - Storage space
+  
+  API Gateway Metrics:
+    - Request count
+    - Latency (p50, p99)
+    - 4XX/5XX errors
+    - Cache hit/miss rate
+
+CloudWatch Alarms:
+  - Lambda error rate > 5%
+  - API Gateway latency > 3 seconds
+  - RDS CPU > 80%
+  - RDS storage < 20% free
+  - WAF blocked requests > 1000/hour
+
+CloudWatch Logs:
+  - All Lambda function logs
+  - API Gateway access logs
+  - VPC Flow Logs
+  - WAF logs
+  - Retention: 30 days
+
+X-Ray Tracing:
+  - Enabled for all Lambda functions
+  - Trace API Gateway requests end-to-end
+  - Identify performance bottlenecks
+  - Debug errors with full request context
+
+SNS Topics:
+  - Critical Alerts: Immediate notification for system failures
+  - Warning Alerts: Non-critical issues requiring attention
+  - Info Notifications: Successful data ingestion, deployments
+```
 
 ## User Interface Design
 
@@ -375,11 +678,57 @@ def test_exclusion_criteria_enforcement(patient_profile, trials):
 - No storage of actual patient data beyond session
 - Anonymized logging and analytics
 - HIPAA compliance considerations for healthcare deployment
+- All patient queries encrypted in transit using TLS 1.2+
+- No PHI (Protected Health Information) stored in logs
 
 ### API Security
-- Rate limiting to prevent abuse
-- Input validation and sanitization
+- Rate limiting to prevent abuse (2000 requests per 5 minutes per IP)
+- Input validation and sanitization on all API endpoints
 - SQL injection prevention through parameterized queries
+- AWS WAF protection against common web attacks
+- API Gateway throttling to prevent DDoS
+- CORS configuration to restrict allowed origins
+
+### Network Security
+- Lambda functions deployed in private subnets with no public IPs
+- RDS database not publicly accessible
+- Security groups enforce least privilege access
+- VPC Flow Logs monitor all network traffic
+- NAT Gateway for controlled outbound internet access
+- All inter-service communication within VPC
+
+### IAM and Access Control
+```yaml
+IAM Roles:
+  Lambda Execution Role:
+    Permissions:
+      - RDS Proxy connection
+      - Bedrock model invocation
+      - CloudWatch Logs write
+      - X-Ray tracing
+      - Parameter Store read (for secrets)
+    
+  Data Ingestion Lambda Role:
+    Permissions:
+      - RDS write access
+      - SNS publish (for alerts)
+      - CloudWatch Logs write
+      - Internet access via NAT Gateway
+  
+  RDS Access:
+    - IAM database authentication enabled
+    - No hardcoded credentials
+    - Secrets stored in Parameter Store with encryption
+```
+
+### Compliance Considerations
+- **HIPAA**: System designed with HIPAA compliance in mind
+  - Encryption at rest and in transit
+  - Audit logging enabled
+  - Access controls and authentication
+  - No PHI storage (queries only, no patient records)
+- **Data Retention**: Logs retained for 30 days, backups for 7 days
+- **Audit Trail**: All API requests logged with timestamps and user context
 
 ## AWS Deployment Strategy
 
@@ -402,25 +751,145 @@ def test_exclusion_criteria_enforcement(patient_profile, trials):
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
 
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
 Resources:
+  # VPC Configuration
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-vpc
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+
+  # Security Groups
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          DestinationSecurityGroupId: !Ref RDSSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+
+  # WAF Configuration
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSetMetric
+        - Name: RateLimitRule
+          Priority: 2
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          Action:
+            Block: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitMetric
+
+  # API Gateway
   TrialMatcherAPI:
     Type: AWS::Serverless::Api
     Properties:
-      StageName: prod
+      StageName: !Ref Environment
       Cors:
         AllowMethods: "'GET,POST,OPTIONS'"
         AllowHeaders: "'content-type'"
         AllowOrigin: "'*'"
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
 
+  # Lambda Functions
   MatchTrialsFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/
       Handler: match_trials.lambda_handler
-      Runtime: python3.9
+      Runtime: python3.11
+      MemorySize: 1024
+      Timeout: 30
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
       Environment:
         Variables:
-          RDS_ENDPOINT: !GetAtt TrialDatabase.Endpoint.Address
+          RDS_PROXY_ENDPOINT: !GetAtt RDSProxy.Endpoint
+          DB_NAME: trials_db
+          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - rds-db:connect
+                - bedrock:InvokeModel
+                - comprehendmedical:*
+              Resource: '*'
       Events:
         MatchTrials:
           Type: Api
@@ -428,14 +897,122 @@ Resources:
             RestApiId: !Ref TrialMatcherAPI
             Path: /match-trials
             Method: post
+      Tracing: Active
 
+  DataIngestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: ingest_trials.lambda_handler
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 300
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          RDS_PROXY_ENDPOINT: !GetAtt RDSProxy.Endpoint
+          DB_NAME: trials_db
+          SNS_ALERT_TOPIC: !Ref AlertTopic
+      Policies:
+        - AWSLambdaVPCAccessExecutionRole
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - rds-db:connect
+                - sns:Publish
+              Resource: '*'
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Description: Daily trial data ingestion
+      Tracing: Active
+
+  # RDS Database
   TrialDatabase:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceClass: db.t3.micro
+      DBInstanceIdentifier: !Sub ${Environment}-vitalmatch-db
+      DBInstanceClass: !If [IsProd, db.t3.medium, db.t3.micro]
       Engine: postgres
-      MasterUsername: !Ref DBUsername
-      MasterUserPassword: !Ref DBPassword
+      EngineVersion: '15.4'
+      AllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      MasterUsername: !Sub '{{resolve:ssm:/${Environment}/db/username}}'
+      MasterUserPassword: !Sub '{{resolve:ssm-secure:/${Environment}/db/password}}'
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      MultiAZ: !If [IsProd, true, false]
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+
+  RDSProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Sub ${Environment}-vitalmatch-proxy
+      EngineFamily: POSTGRESQL
+      Auth:
+        - AuthScheme: SECRETS
+          IAMAuth: REQUIRED
+          SecretArn: !Ref DBSecret
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      VpcSubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      VpcSecurityGroupIds:
+        - !Ref RDSSecurityGroup
+
+  # SNS Topic for Alerts
+  AlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${Environment}-vitalmatch-alerts
+      DisplayName: VitalMatch System Alerts
+
+  # CloudWatch Alarms
+  LambdaErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-lambda-errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref AlertTopic
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway endpoint URL
+    Value: !Sub https://${TrialMatcherAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+  
+  RDSProxyEndpoint:
+    Description: RDS Proxy endpoint
+    Value: !GetAtt RDSProxy.Endpoint
 ```
 
 ### Cost Optimization

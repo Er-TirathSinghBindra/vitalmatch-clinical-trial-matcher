@@ -183,12 +183,17 @@ An intelligent system that can:
 - Frontend must be hosted on S3 with CloudFront CDN for global performance
 - Backend must use serverless architecture (API Gateway + Lambda) for cost efficiency
 - Database must use managed RDS PostgreSQL with automated backups and high availability
+- All Lambda functions must be deployed within a VPC private subnet for security
+- RDS database must be deployed in a private subnet with security group restrictions
+- AWS WAF must protect both CloudFront and API Gateway from common web attacks
 
 ### TR2: Data Architecture
 - Database must store trials with structured fields (id, title, condition, min_age, max_age, gender_criteria)
 - Database must store unstructured eligibility text (inclusion_text, exclusion_text)
 - System must support efficient SQL-based filtering for hard criteria
 - RDS Proxy must be used for Lambda database connection pooling
+- Database must be accessible only from Lambda functions within the VPC private subnet
+- Security groups must restrict database access to authorized Lambda functions only
 
 ### TR3: AI/NLP Integration
 - System must use AWS managed AI services (Amazon Bedrock) for medical text matching
@@ -208,12 +213,21 @@ An intelligent system that can:
 - Lambda functions must handle API rate limits and bulk download options
 - System must parse and normalize data from external sources
 - Ingestion errors must trigger SNS notifications for monitoring
+- Data ingestion Lambda must run within VPC private subnet with internet access via NAT Gateway
+- ClinicalTrials.gov API must be accessed securely with proper authentication and rate limiting
+- System must handle both JSON and XML response formats from the external API
+- Failed API calls must implement exponential backoff retry logic
 
 ### TR6: Security and Compliance
 - All data must be encrypted in transit and at rest using AWS KMS
 - API access must be secured through AWS WAF and API Gateway throttling
 - Database access must be restricted through VPC and security groups
 - System must be designed with HIPAA compliance considerations for healthcare data
+- AWS WAF must implement rules to protect against SQL injection, XSS, and DDoS attacks
+- Security groups must follow principle of least privilege for all resources
+- Lambda functions must use IAM roles with minimal required permissions
+- VPC Flow Logs must be enabled for network traffic monitoring
+- All API requests must be logged to CloudWatch for audit purposes
 
 ## Non-Functional Requirements
 
