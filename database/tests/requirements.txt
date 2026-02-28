@@ -1,0 +1,6 @@
+# Database Schema Validation Test Dependencies
+# Task 2.2: Write database schema validation tests
+
+pytest>=7.4.0
+psycopg2-binary>=2.9.9
+python-dotenv>=1.0.0
