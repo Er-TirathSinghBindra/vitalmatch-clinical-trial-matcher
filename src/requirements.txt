@@ -1,0 +1,14 @@
+# VitalMatch Data Ingestion Lambda Dependencies
+
+# HTTP client for ClinicalTrials.gov API
+requests==2.31.0
+
+# PostgreSQL database adapter
+psycopg2-binary==2.9.9
+
+# AWS SDK for Python (usually included in Lambda runtime, but specified for local testing)
+boto3==1.34.0
+
+# Testing dependencies
+pytest==7.4.3
+hypothesis==6.92.1
