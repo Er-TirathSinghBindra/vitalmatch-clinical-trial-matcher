@@ -1,0 +1,1392 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: VitalMatch Clinical Trial Matcher - AWS Infrastructure
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues:
+      - dev
+      - staging
+      - prod
+    Description: Environment name for resource naming and configuration
+
+  DBUsername:
+    Type: String
+    Default: vitalmatch_admin
+    Description: Database master username
+    NoEcho: true
+
+Conditions:
+  IsProd: !Equals [!Ref Environment, prod]
+
+Resources:
+  # ============================================================================
+  # VPC and Network Configuration (Task 1.1)
+  # ============================================================================
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-vpc
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Internet Gateway for NAT Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-igw
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Public Subnet for NAT Gateway
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-public-subnet
+
+  # Private Subnets for Lambda and RDS
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-private-subnet-a
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-private-subnet-b
+
+  # Elastic IP for NAT Gateway
+  NATGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-nat-eip
+
+  # NAT Gateway for Lambda outbound internet access
+  NATGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NATGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-nat
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-public-rt
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-private-rt
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGateway
+
+  PrivateSubnetARouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetBRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Groups
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Environment}-vitalmatch-lambda-sg
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS for external API calls
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-lambda-sg
+
+  RDSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Environment}-vitalmatch-rds-sg
+      GroupDescription: Security group for RDS database
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: Allow PostgreSQL access from Lambda
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-rds-sg
+
+  # Security Group Egress Rule for Lambda to RDS (breaks circular dependency)
+  LambdaToRDSEgressRule:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LambdaSecurityGroup
+      IpProtocol: tcp
+      FromPort: 5432
+      ToPort: 5432
+      DestinationSecurityGroupId: !Ref RDSSecurityGroup
+      Description: Allow PostgreSQL access to RDS
+
+  # VPC Flow Logs
+  VPCFlowLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: vpc-flow-logs.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CloudWatchLogPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogGroups
+                  - logs:DescribeLogStreams
+                Resource: '*'
+
+  VPCFlowLogsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/vpc/${Environment}-vitalmatch-flowlogs
+      RetentionInDays: 30
+
+  VPCFlowLog:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceType: VPC
+      ResourceId: !Ref VPC
+      TrafficType: ALL
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref VPCFlowLogsLogGroup
+      DeliverLogsPermissionArn: !GetAtt VPCFlowLogsRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-flowlog
+
+  # ============================================================================
+  # RDS PostgreSQL Database with RDS Proxy (Task 1.2)
+  # ============================================================================
+
+  # Database Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupName: !Sub ${Environment}-vitalmatch-db-subnet-group
+      DBSubnetGroupDescription: Subnet group for VitalMatch RDS database
+      SubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-db-subnet-group
+
+  # KMS Key for RDS Encryption
+  RDSKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for RDS encryption
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: kms:*
+            Resource: '*'
+          - Sid: Allow RDS to use the key
+            Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+              - kms:CreateGrant
+            Resource: '*'
+
+  RDSKMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/${Environment}-vitalmatch-rds
+      TargetKeyId: !Ref RDSKMSKey
+
+  # RDS PostgreSQL Instance
+  TrialDatabase:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Snapshot
+    UpdateReplacePolicy: Snapshot
+    Properties:
+      DBInstanceIdentifier: !Sub ${Environment}-vitalmatch-db
+      DBInstanceClass: !If [IsProd, db.t3.medium, db.t3.medium]
+      Engine: postgres
+      EngineVersion: '17.7'
+      AllocatedStorage: 100
+      StorageType: gp3
+      StorageEncrypted: true
+      KmsKeyId: !Ref RDSKMSKey
+      MasterUsername: !Sub '{{resolve:secretsmanager:${DBSecret}:SecretString:username}}'
+      MasterUserPassword: !Sub '{{resolve:secretsmanager:${DBSecret}:SecretString:password}}'
+      DBName: trials_db
+      VPCSecurityGroups:
+        - !Ref RDSSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      MultiAZ: !If [IsProd, true, false]
+      BackupRetentionPeriod: 7
+      PreferredBackupWindow: '03:00-04:00'
+      PreferredMaintenanceWindow: 'sun:04:00-sun:05:00'
+      EnableIAMDatabaseAuthentication: true
+      EnableCloudwatchLogsExports:
+        - postgresql
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-db
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Secrets Manager Secret for Database Credentials (created first with auto-generated password)
+  DBSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub ${Environment}/vitalmatch/db-credentials
+      Description: Database credentials for VitalMatch
+      GenerateSecretString:
+        SecretStringTemplate: !Sub '{"username": "${DBUsername}"}'
+        GenerateStringKey: password
+        PasswordLength: 32
+        ExcludeCharacters: '"@/\'
+        RequireEachIncludedType: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-db-secret
+        - Key: Environment
+          Value: !Ref Environment
+
+  # RDS Proxy IAM Role
+  RDSProxyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+      Policies:
+        - PolicyName: RDSProxySecretsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - secretsmanager:DescribeSecret
+                Resource: !Ref DBSecret
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !GetAtt RDSKMSKey.Arn
+
+  # RDS Proxy
+  RDSProxy:
+    Type: AWS::RDS::DBProxy
+    Properties:
+      DBProxyName: !Sub ${Environment}-vitalmatch-proxy
+      EngineFamily: POSTGRESQL
+      Auth:
+        - AuthScheme: SECRETS
+          IAMAuth: REQUIRED
+          SecretArn: !Ref DBSecret
+      RoleArn: !GetAtt RDSProxyRole.Arn
+      VpcSubnetIds:
+        - !Ref PrivateSubnetA
+        - !Ref PrivateSubnetB
+      VpcSecurityGroupIds:
+        - !Ref RDSSecurityGroup
+      RequireTLS: true
+      IdleClientTimeout: 1800
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-proxy
+
+  RDSProxyTargetGroup:
+    Type: AWS::RDS::DBProxyTargetGroup
+    Properties:
+      DBProxyName: !Ref RDSProxy
+      TargetGroupName: default
+      DBInstanceIdentifiers:
+        - !Ref TrialDatabase
+      ConnectionPoolConfigurationInfo:
+        MaxConnectionsPercent: 100
+        MaxIdleConnectionsPercent: 50
+        ConnectionBorrowTimeout: 120
+
+  # Attach secret to RDS instance for automatic rotation support
+  SecretRDSAttachment:
+    Type: AWS::SecretsManager::SecretTargetAttachment
+    Properties:
+      SecretId: !Ref DBSecret
+      TargetId: !Ref TrialDatabase
+      TargetType: AWS::RDS::DBInstance
+
+  # Store database credentials in Parameter Store (for backward compatibility)
+  DBUsernameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${Environment}/vitalmatch/db/username
+      Type: String
+      Value: !Ref DBUsername
+      Description: Database username for VitalMatch
+
+  DBEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${Environment}/vitalmatch/db/endpoint
+      Type: String
+      Value: !GetAtt TrialDatabase.Endpoint.Address
+      Description: Database endpoint for VitalMatch
+
+  RDSProxyEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /${Environment}/vitalmatch/db/proxy-endpoint
+      Type: String
+      Value: !GetAtt RDSProxy.Endpoint
+      Description: RDS Proxy endpoint for VitalMatch
+
+  # ============================================================================
+  # AWS WAF for API and CloudFront Protection (Task 1.3)
+  # ============================================================================
+
+  # WAF Web ACL
+  WebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${Environment}-vitalmatch-waf
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      Rules:
+        # AWS Managed Rules - Core Rule Set
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesCommonRuleSetMetric
+
+        # AWS Managed Rules - Known Bad Inputs
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesKnownBadInputsRuleSetMetric
+
+        # SQL Injection Protection
+        - Name: AWSManagedRulesSQLiRuleSet
+          Priority: 3
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesSQLiRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedRulesSQLiRuleSetMetric
+
+        # Rate Limiting - 2000 requests per 5 minutes per IP
+        - Name: RateLimitRule
+          Priority: 4
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 429
+                CustomResponseBodyKey: RateLimitExceeded
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: RateLimitMetric
+
+      CustomResponseBodies:
+        RateLimitExceeded:
+          ContentType: APPLICATION_JSON
+          Content: '{"error": "Rate limit exceeded. Please try again later."}'
+
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${Environment}VitalMatchWAF
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-waf
+        - Key: Environment
+          Value: !Ref Environment
+
+  # WAF Logging Configuration
+  WAFLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/waf/${Environment}-vitalmatch
+      RetentionInDays: 30
+
+  WAFLoggingConfiguration:
+    Type: AWS::WAFv2::LoggingConfiguration
+    Properties:
+      ResourceArn: !GetAtt WebACL.Arn
+      LogDestinationConfigs:
+        - !GetAtt WAFLogGroup.Arn
+
+  # SNS Topic for WAF Alerts
+  WAFAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${Environment}-vitalmatch-waf-alerts
+      DisplayName: VitalMatch WAF Security Alerts
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-waf-alerts
+
+  # CloudWatch Alarm for High WAF Block Rate
+  WAFBlockRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-waf-high-block-rate
+      AlarmDescription: Alert when WAF blocks more than 1000 requests per hour
+      MetricName: BlockedRequests
+      Namespace: AWS/WAFV2
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 1000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: Rule
+          Value: ALL
+        - Name: WebACL
+          Value: !Sub ${Environment}-vitalmatch-waf
+        - Name: Region
+          Value: !Ref AWS::Region
+      AlarmActions:
+        - !Ref WAFAlertTopic
+      TreatMissingData: notBreaching
+
+  # General SNS Topic for System Alerts
+  SystemAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${Environment}-vitalmatch-system-alerts
+      DisplayName: VitalMatch System Alerts
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-system-alerts
+
+  # ============================================================================
+  # Lambda Functions
+  # ============================================================================
+
+  # IAM Role for Match Trials Lambda
+  MatchTrialsLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-vitalmatch-match-trials-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: MatchTrialsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # RDS Proxy connection
+              - Effect: Allow
+                Action:
+                  - rds-db:connect
+                Resource: !Sub arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/*
+              # Amazon Bedrock for AI matching
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                Resource: '*'
+              # Amazon Comprehend Medical (if needed)
+              - Effect: Allow
+                Action:
+                  - comprehendmedical:*
+                Resource: '*'
+              # CloudWatch metrics
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              # Secrets Manager (for database credentials)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+              # Parameter Store (for configuration)
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/vitalmatch/*
+
+  # Match Trials Lambda Function
+  MatchTrialsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-vitalmatch-match-trials
+      CodeUri: src/
+      Handler: match_trials.lambda_handler
+      Runtime: python3.11
+      MemorySize: 1024
+      Timeout: 30
+      Role: !GetAtt MatchTrialsLambdaRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          RDS_PROXY_ENDPOINT: !GetAtt RDSProxy.Endpoint
+          DB_NAME: trials_db
+          DB_SECRET_ARN: !Ref DBSecret
+          DB_PORT: '5432'
+          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+      Tracing: Active
+      Tags:
+        Name: !Sub ${Environment}-vitalmatch-match-trials
+        Environment: !Ref Environment
+
+  # CloudWatch Log Group for Match Trials Lambda
+  MatchTrialsLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Environment}-vitalmatch-match-trials
+      RetentionInDays: 30
+
+  # CloudWatch Alarm for Match Trials Errors
+  MatchTrialsErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-match-trials-errors
+      AlarmDescription: Alert when match-trials Lambda error rate exceeds 5%
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MatchTrialsFunction
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for Match Trials Duration
+  MatchTrialsDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-match-trials-duration
+      AlarmDescription: Alert when match-trials Lambda duration exceeds 15 seconds
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 15000  # 15 seconds in milliseconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MatchTrialsFunction
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # IAM Role for Data Ingestion Lambda
+  DataIngestionLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-vitalmatch-data-ingestion-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+      Policies:
+        - PolicyName: DataIngestionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # RDS Proxy connection
+              - Effect: Allow
+                Action:
+                  - rds-db:connect
+                Resource: !Sub arn:aws:rds-db:${AWS::Region}:${AWS::AccountId}:dbuser:*/*
+              # SNS notifications
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref SystemAlertTopic
+              # CloudWatch metrics
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+              # Secrets Manager (for database credentials)
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref DBSecret
+              # Parameter Store (for configuration)
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${Environment}/vitalmatch/*
+
+  # Data Ingestion Lambda Function
+  DataIngestionFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-vitalmatch-data-ingestion
+      CodeUri: src/
+      Handler: ingest_trials.lambda_handler
+      Runtime: python3.11
+      MemorySize: 512
+      Timeout: 300
+      Role: !GetAtt DataIngestionLambdaRole.Arn
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnetA
+          - !Ref PrivateSubnetB
+      Environment:
+        Variables:
+          RDS_PROXY_ENDPOINT: !GetAtt RDSProxy.Endpoint
+          DB_NAME: trials_db
+          DB_SECRET_ARN: !Ref DBSecret
+          SNS_ALERT_TOPIC: !Ref SystemAlertTopic
+      Events:
+        DailySchedule:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)
+            Description: Daily trial data ingestion at 2 AM UTC
+            Enabled: true
+      Tags:
+        Name: !Sub ${Environment}-vitalmatch-data-ingestion
+        Environment: !Ref Environment
+
+  # CloudWatch Log Group for Data Ingestion Lambda
+  DataIngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${Environment}-vitalmatch-data-ingestion
+      RetentionInDays: 30
+
+  # CloudWatch Alarm for Data Ingestion Errors
+  DataIngestionErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-data-ingestion-errors
+      AlarmDescription: Alert when data ingestion Lambda has errors
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DataIngestionFunction
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for Data Ingestion Duration
+  DataIngestionDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-data-ingestion-duration
+      AlarmDescription: Alert when data ingestion takes too long
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 270000  # 270 seconds (90% of 300 second timeout)
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref DataIngestionFunction
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # API Gateway (Task 8)
+  # ============================================================================
+
+  # CloudWatch Log Group for API Gateway
+  ApiGatewayLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/apigateway/${Environment}-vitalmatch-api
+      RetentionInDays: 30
+
+  # IAM Role for API Gateway Logging
+  ApiGatewayLoggingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs
+
+  # API Gateway Account (for CloudWatch logging)
+  ApiGatewayAccount:
+    Type: AWS::ApiGateway::Account
+    Properties:
+      CloudWatchRoleArn: !GetAtt ApiGatewayLoggingRole.Arn
+
+  # REST API
+  TrialMatcherAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${Environment}-vitalmatch-api
+      Description: VitalMatch Clinical Trial Matcher API
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      Policy:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: '*'
+            Action: execute-api:Invoke
+            Resource: '*'
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-api
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Request Model for Patient Profile
+  PatientProfileModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      ContentType: application/json
+      Name: PatientProfile
+      Description: Patient profile request model
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: PatientProfile
+        type: object
+        required:
+          - condition
+          - age
+          - gender
+          - location
+        properties:
+          condition:
+            type: string
+            minLength: 1
+            description: Medical condition
+          age:
+            type: integer
+            minimum: 0
+            maximum: 120
+            description: Patient age
+          gender:
+            type: string
+            enum:
+              - Male
+              - Female
+              - Other
+              - Prefer not to say
+            description: Patient gender
+          location:
+            type: string
+            minLength: 1
+            description: Patient location (city, state)
+          distance_miles:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 50
+            description: Search radius in miles
+          medical_history:
+            type: string
+            description: Patient medical history
+
+  # Response Model for Match Results
+  MatchResultsModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      ContentType: application/json
+      Name: MatchResults
+      Description: Trial match results response model
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: MatchResults
+        type: object
+        properties:
+          matches:
+            type: array
+            items:
+              type: object
+              properties:
+                trial_id:
+                  type: string
+                title:
+                  type: string
+                match_score:
+                  type: number
+                explanation:
+                  type: string
+                key_criteria:
+                  type: array
+                  items:
+                    type: string
+          total_trials_considered:
+            type: integer
+          hard_filtered_count:
+            type: integer
+          processing_time_ms:
+            type: integer
+
+  # Error Response Model
+  ErrorModel:
+    Type: AWS::ApiGateway::Model
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      ContentType: application/json
+      Name: Error
+      Description: Error response model
+      Schema:
+        $schema: 'http://json-schema.org/draft-04/schema#'
+        title: Error
+        type: object
+        properties:
+          error:
+            type: string
+          message:
+            type: string
+
+  # Request Validator
+  RequestValidator:
+    Type: AWS::ApiGateway::RequestValidator
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      Name: !Sub ${Environment}-request-validator
+      ValidateRequestBody: true
+      ValidateRequestParameters: true
+
+  # /match-trials Resource
+  MatchTrialsResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      ParentId: !GetAtt TrialMatcherAPI.RootResourceId
+      PathPart: match-trials
+
+  # POST /match-trials Method
+  MatchTrialsPostMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      ResourceId: !Ref MatchTrialsResource
+      HttpMethod: POST
+      AuthorizationType: NONE
+      RequestValidatorId: !Ref RequestValidator
+      RequestModels:
+        application/json: !Ref PatientProfileModel
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: !Ref MatchResultsModel
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+        - StatusCode: 400
+          ResponseModels:
+            application/json: !Ref ErrorModel
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+        - StatusCode: 500
+          ResponseModels:
+            application/json: !Ref ErrorModel
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+      Integration:
+        Type: AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MatchTrialsFunction.Arn}/invocations
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+
+  # OPTIONS /match-trials Method (for CORS preflight)
+  MatchTrialsOptionsMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      ResourceId: !Ref MatchTrialsResource
+      HttpMethod: OPTIONS
+      AuthorizationType: NONE
+      MethodResponses:
+        - StatusCode: 200
+          ResponseParameters:
+            method.response.header.Access-Control-Allow-Origin: true
+            method.response.header.Access-Control-Allow-Headers: true
+            method.response.header.Access-Control-Allow-Methods: true
+      Integration:
+        Type: MOCK
+        RequestTemplates:
+          application/json: '{"statusCode": 200}'
+        IntegrationResponses:
+          - StatusCode: 200
+            ResponseParameters:
+              method.response.header.Access-Control-Allow-Origin: "'*'"
+              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
+              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+            ResponseTemplates:
+              application/json: ''
+
+  # Lambda Permission for API Gateway
+  MatchTrialsApiPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MatchTrialsFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${TrialMatcherAPI}/*/*/*
+
+  # API Gateway Deployment
+  ApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    DependsOn:
+      - MatchTrialsPostMethod
+      - MatchTrialsOptionsMethod
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      Description: !Sub ${Environment} deployment
+
+  # Dev Stage
+  DevStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      DeploymentId: !Ref ApiDeployment
+      StageName: dev
+      Description: Development stage
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 2000
+          ThrottlingRateLimit: 1000
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '$context.requestId $context.extendedRequestId $context.identity.sourceIp $context.requestTime $context.httpMethod $context.routeKey $context.status $context.protocol $context.responseLength'
+      Variables:
+        environment: dev
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-api-dev
+        - Key: Stage
+          Value: dev
+
+  # Staging Stage
+  StagingStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      DeploymentId: !Ref ApiDeployment
+      StageName: staging
+      Description: Staging stage
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: INFO
+          DataTraceEnabled: true
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 2000
+          ThrottlingRateLimit: 1000
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '$context.requestId $context.extendedRequestId $context.identity.sourceIp $context.requestTime $context.httpMethod $context.routeKey $context.status $context.protocol $context.responseLength'
+      Variables:
+        environment: staging
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-api-staging
+        - Key: Stage
+          Value: staging
+
+  # Production Stage
+  ProdStage:
+    Type: AWS::ApiGateway::Stage
+    Properties:
+      RestApiId: !Ref TrialMatcherAPI
+      DeploymentId: !Ref ApiDeployment
+      StageName: prod
+      Description: Production stage
+      TracingEnabled: true
+      MethodSettings:
+        - ResourcePath: '/*'
+          HttpMethod: '*'
+          LoggingLevel: ERROR
+          DataTraceEnabled: false
+          MetricsEnabled: true
+          ThrottlingBurstLimit: 2000
+          ThrottlingRateLimit: 1000
+      AccessLogSetting:
+        DestinationArn: !GetAtt ApiGatewayLogGroup.Arn
+        Format: '$context.requestId $context.extendedRequestId $context.identity.sourceIp $context.requestTime $context.httpMethod $context.routeKey $context.status $context.protocol $context.responseLength'
+      Variables:
+        environment: prod
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-api-prod
+        - Key: Stage
+          Value: prod
+
+  # Associate WAF with API Gateway Stage
+  ApiGatewayWAFAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    DependsOn:
+      - DevStage
+    Properties:
+      ResourceArn: !Sub arn:aws:apigateway:${AWS::Region}::/restapis/${TrialMatcherAPI}/stages/${Environment}
+      WebACLArn: !GetAtt WebACL.Arn
+
+  # CloudWatch Alarm for API Gateway 4XX Errors
+  ApiGateway4XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-api-4xx-errors
+      AlarmDescription: Alert when API Gateway 4XX error rate is high
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 50
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub ${Environment}-vitalmatch-api
+        - Name: Stage
+          Value: !Ref Environment
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for API Gateway 5XX Errors
+  ApiGateway5XXAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-api-5xx-errors
+      AlarmDescription: Alert when API Gateway 5XX error rate is high
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub ${Environment}-vitalmatch-api
+        - Name: Stage
+          Value: !Ref Environment
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for API Gateway Latency
+  ApiGatewayLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-api-latency
+      AlarmDescription: Alert when API Gateway latency exceeds 3 seconds
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 3000  # 3 seconds in milliseconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: ApiName
+          Value: !Sub ${Environment}-vitalmatch-api
+        - Name: Stage
+          Value: !Ref Environment
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+# ============================================================================
+# Outputs
+# ============================================================================
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-VPC-ID
+
+  PrivateSubnetAId:
+    Description: Private Subnet A ID
+    Value: !Ref PrivateSubnetA
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-PrivateSubnetA-ID
+
+  PrivateSubnetBId:
+    Description: Private Subnet B ID
+    Value: !Ref PrivateSubnetB
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-PrivateSubnetB-ID
+
+  LambdaSecurityGroupId:
+    Description: Lambda Security Group ID
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-Lambda-SG-ID
+
+  RDSSecurityGroupId:
+    Description: RDS Security Group ID
+    Value: !Ref RDSSecurityGroup
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-RDS-SG-ID
+
+  RDSEndpoint:
+    Description: RDS PostgreSQL endpoint
+    Value: !GetAtt TrialDatabase.Endpoint.Address
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-RDS-Endpoint
+
+  RDSProxyEndpoint:
+    Description: RDS Proxy endpoint for Lambda connections
+    Value: !GetAtt RDSProxy.Endpoint
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-RDSProxy-Endpoint
+
+  DBSecretArn:
+    Description: ARN of the database credentials secret
+    Value: !Ref DBSecret
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-DB-Secret-ARN
+
+  WebACLArn:
+    Description: WAF Web ACL ARN
+    Value: !GetAtt WebACL.Arn
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-WAF-ARN
+
+  WAFAlertTopicArn:
+    Description: SNS Topic ARN for WAF alerts
+    Value: !Ref WAFAlertTopic
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-WAF-Alert-Topic-ARN
+
+  SystemAlertTopicArn:
+    Description: SNS Topic ARN for system alerts
+    Value: !Ref SystemAlertTopic
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-System-Alert-Topic-ARN
+
+  DataIngestionFunctionArn:
+    Description: Data Ingestion Lambda Function ARN
+    Value: !GetAtt DataIngestionFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-DataIngestion-Function-ARN
+
+  DataIngestionFunctionName:
+    Description: Data Ingestion Lambda Function Name
+    Value: !Ref DataIngestionFunction
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-DataIngestion-Function-Name
+
+  MatchTrialsFunctionArn:
+    Description: Match Trials Lambda Function ARN
+    Value: !GetAtt MatchTrialsFunction.Arn
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-MatchTrials-Function-ARN
+
+  MatchTrialsFunctionName:
+    Description: Match Trials Lambda Function Name
+    Value: !Ref MatchTrialsFunction
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-MatchTrials-Function-Name
+
+  ApiGatewayId:
+    Description: API Gateway REST API ID
+    Value: !Ref TrialMatcherAPI
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-API-ID
+
+  ApiGatewayRootResourceId:
+    Description: API Gateway Root Resource ID
+    Value: !GetAtt TrialMatcherAPI.RootResourceId
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-API-RootResourceId
+
+  DevStageUrl:
+    Description: API Gateway Dev Stage URL
+    Value: !Sub https://${TrialMatcherAPI}.execute-api.${AWS::Region}.amazonaws.com/dev
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-API-Dev-URL
+
+  StagingStageUrl:
+    Description: API Gateway Staging Stage URL
+    Value: !Sub https://${TrialMatcherAPI}.execute-api.${AWS::Region}.amazonaws.com/staging
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-API-Staging-URL
+
+  ProdStageUrl:
+    Description: API Gateway Production Stage URL
+    Value: !Sub https://${TrialMatcherAPI}.execute-api.${AWS::Region}.amazonaws.com/prod
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-API-Prod-URL
+
+  ApiEndpoint:
+    Description: API Gateway endpoint URL for current environment
+    Value: !Sub https://${TrialMatcherAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-API-Endpoint
