@@ -8,13 +8,18 @@ Uses Claude 3 Sonnet for intelligent medical terminology understanding.
 
 import json
 import logging
-from typing import Dict, Any, Optional
+import os
 import boto3
+from datetime import datetime
+from typing import Dict, Any, Optional
 from botocore.exceptions import ClientError, BotoCoreError
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+# Initialize CloudWatch client for custom metrics
+cloudwatch_client = boto3.client('cloudwatch')
 
 
 class BedrockError(Exception):
@@ -201,6 +206,9 @@ Respond with ONLY the JSON object, no additional text.
             # Parse response body
             response_body = json.loads(response['body'].read())
             
+            # Emit custom metric for Bedrock invocation
+            self._emit_bedrock_metric()
+            
             logger.debug("Bedrock model invocation successful")
             return response_body
             
@@ -297,3 +305,36 @@ Respond with ONLY the JSON object, no additional text.
         except Exception as e:
             logger.error(f"Unexpected error parsing response: {str(e)}")
             raise BedrockError(f"Response parsing failed: {str(e)}")
+    
+    def _emit_bedrock_metric(self) -> None:
+        """
+        Emit custom CloudWatch metric for Bedrock invocation.
+        
+        This tracks the number of Bedrock API calls made for monitoring and cost tracking.
+        """
+        try:
+            environment = os.environ.get('ENVIRONMENT', 'dev')
+            
+            cloudwatch_client.put_metric_data(
+                Namespace='VitalMatch',
+                MetricData=[
+                    {
+                        'MetricName': 'BedrockInvocations',
+                        'Value': 1,
+                        'Unit': 'Count',
+                        'Timestamp': datetime.utcnow(),
+                        'Dimensions': [
+                            {
+                                'Name': 'Environment',
+                                'Value': environment
+                            }
+                        ]
+                    }
+                ]
+            )
+            
+            logger.debug("Emitted Bedrock invocation metric to CloudWatch")
+            
+        except Exception as e:
+            # Don't fail the request if metrics emission fails
+            logger.warning(f"Failed to emit Bedrock metric: {str(e)}")

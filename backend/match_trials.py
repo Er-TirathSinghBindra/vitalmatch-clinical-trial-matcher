@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import time
+import boto3
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 
 from hard_filter.filter_engine import HardFilterEngine, PatientProfile as HardFilterPatientProfile
@@ -17,6 +19,9 @@ from ai_matching.match_scorer import MatchScorer, PatientProfile as ScorerPatien
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# Initialize CloudWatch client for custom metrics
+cloudwatch_client = boto3.client('cloudwatch')
 
 
 class ValidationError(Exception):
@@ -107,6 +112,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.info(
             f"Request {request_id}: Complete - "
             f"{len(match_results)} matches in {total_processing_time_ms:.2f}ms"
+        )
+        
+        # Emit custom CloudWatch metrics
+        emit_custom_metrics(
+            total_trials=hard_filter_result.total_count,
+            hard_filtered_count=hard_filter_result.filtered_count,
+            matches_returned=len(match_results),
+            match_scores=[result.match_percentage / 100.0 for result in match_results]
         )
         
         return {
@@ -354,3 +367,88 @@ def format_response(
         'hard_filtered_count': hard_filtered_count,
         'processing_time_ms': round(processing_time_ms, 2)
     }
+
+
+def emit_custom_metrics(
+    total_trials: int,
+    hard_filtered_count: int,
+    matches_returned: int,
+    match_scores: List[float]
+) -> None:
+    """
+    Emit custom CloudWatch metrics for trial matching
+    
+    Args:
+        total_trials: Total number of trials considered
+        hard_filtered_count: Number of trials after hard filtering
+        matches_returned: Number of matches returned to user
+        match_scores: List of match scores (0-1 scale)
+    """
+    try:
+        environment = os.environ.get('ENVIRONMENT', 'dev')
+        
+        metric_data = [
+            {
+                'MetricName': 'TrialsProcessed',
+                'Value': total_trials,
+                'Unit': 'Count',
+                'Timestamp': datetime.utcnow(),
+                'Dimensions': [
+                    {
+                        'Name': 'Environment',
+                        'Value': environment
+                    }
+                ]
+            },
+            {
+                'MetricName': 'HardFilteredTrials',
+                'Value': hard_filtered_count,
+                'Unit': 'Count',
+                'Timestamp': datetime.utcnow(),
+                'Dimensions': [
+                    {
+                        'Name': 'Environment',
+                        'Value': environment
+                    }
+                ]
+            },
+            {
+                'MetricName': 'MatchesReturned',
+                'Value': matches_returned,
+                'Unit': 'Count',
+                'Timestamp': datetime.utcnow(),
+                'Dimensions': [
+                    {
+                        'Name': 'Environment',
+                        'Value': environment
+                    }
+                ]
+            }
+        ]
+        
+        # Add individual match scores
+        for score in match_scores:
+            metric_data.append({
+                'MetricName': 'MatchScore',
+                'Value': score,
+                'Unit': 'None',
+                'Timestamp': datetime.utcnow(),
+                'Dimensions': [
+                    {
+                        'Name': 'Environment',
+                        'Value': environment
+                    }
+                ]
+            })
+        
+        # Emit metrics to CloudWatch
+        cloudwatch_client.put_metric_data(
+            Namespace='VitalMatch',
+            MetricData=metric_data
+        )
+        
+        logger.info(f"Emitted {len(metric_data)} custom metrics to CloudWatch")
+        
+    except Exception as e:
+        # Don't fail the request if metrics emission fails
+        logger.warning(f"Failed to emit custom metrics: {str(e)}")
