@@ -643,7 +643,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ${Environment}-vitalmatch-match-trials
-      CodeUri: src/
+      CodeUri: backend/
       Handler: match_trials.lambda_handler
       Runtime: python3.11
       MemorySize: 1024
@@ -675,24 +675,45 @@ Resources:
       RetentionInDays: 30
 
   # CloudWatch Alarm for Match Trials Errors
+  # CloudWatch Alarm for Match Trials Error Rate
   MatchTrialsErrorAlarm:
     Type: AWS::CloudWatch::Alarm
     Properties:
-      AlarmName: !Sub ${Environment}-vitalmatch-match-trials-errors
+      AlarmName: !Sub ${Environment}-vitalmatch-match-trials-error-rate
       AlarmDescription: Alert when match-trials Lambda error rate exceeds 5%
-      MetricName: Errors
-      Namespace: AWS/Lambda
-      Statistic: Sum
-      Period: 300
-      EvaluationPeriods: 1
-      Threshold: 5
+      Metrics:
+        - Id: errors
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Errors
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref MatchTrialsFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: invocations
+          MetricStat:
+            Metric:
+              Namespace: AWS/Lambda
+              MetricName: Invocations
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref MatchTrialsFunction
+            Period: 300
+            Stat: Sum
+          ReturnData: false
+        - Id: error_rate
+          Expression: "(errors / invocations) * 100"
+          Label: Error Rate (%)
+          ReturnData: true
       ComparisonOperator: GreaterThanThreshold
-      Dimensions:
-        - Name: FunctionName
-          Value: !Ref MatchTrialsFunction
+      Threshold: 5
+      EvaluationPeriods: 1
+      TreatMissingData: notBreaching
       AlarmActions:
         - !Ref SystemAlertTopic
-      TreatMissingData: notBreaching
 
   # CloudWatch Alarm for Match Trials Duration
   MatchTrialsDurationAlarm:
@@ -765,7 +786,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       FunctionName: !Sub ${Environment}-vitalmatch-data-ingestion
-      CodeUri: src/
+      CodeUri: backend/
       Handler: ingest_trials.lambda_handler
       Runtime: python3.11
       MemorySize: 512
@@ -790,6 +811,7 @@ Resources:
             Schedule: cron(0 2 * * ? *)
             Description: Daily trial data ingestion at 2 AM UTC
             Enabled: true
+      Tracing: Active
       Tags:
         Name: !Sub ${Environment}-vitalmatch-data-ingestion
         Environment: !Ref Environment
@@ -837,6 +859,110 @@ Resources:
       Dimensions:
         - Name: FunctionName
           Value: !Ref DataIngestionFunction
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # ============================================================================
+  # RDS CloudWatch Alarms (Task 12.2)
+  # ============================================================================
+
+  # CloudWatch Alarm for RDS CPU Utilization
+  RDSCPUAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-rds-cpu-high
+      AlarmDescription: Alert when RDS CPU utilization exceeds 80%
+      MetricName: CPUUtilization
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref TrialDatabase
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for RDS Free Storage Space
+  RDSStorageAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-rds-storage-low
+      AlarmDescription: Alert when RDS free storage space is less than 20%
+      MetricName: FreeStorageSpace
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 21474836480  # 20 GB in bytes (20% of 100 GB)
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref TrialDatabase
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for RDS Database Connections
+  RDSConnectionsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-rds-connections-high
+      AlarmDescription: Alert when RDS database connections are high
+      MetricName: DatabaseConnections
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80  # Adjust based on max_connections setting
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref TrialDatabase
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for RDS Read Latency
+  RDSReadLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-rds-read-latency-high
+      AlarmDescription: Alert when RDS read latency is high
+      MetricName: ReadLatency
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0.1  # 100ms in seconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref TrialDatabase
+      AlarmActions:
+        - !Ref SystemAlertTopic
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm for RDS Write Latency
+  RDSWriteLatencyAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${Environment}-vitalmatch-rds-write-latency-high
+      AlarmDescription: Alert when RDS write latency is high
+      MetricName: WriteLatency
+      Namespace: AWS/RDS
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 0.1  # 100ms in seconds
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: DBInstanceIdentifier
+          Value: !Ref TrialDatabase
       AlarmActions:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
@@ -1260,6 +1386,1213 @@ Resources:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
 
+  # ============================================================================
+  # S3 Bucket for Static Website Hosting (Task 11.1)
+  # ============================================================================
+
+  # S3 Bucket for Frontend Static Website
+  FrontendBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Environment}-vitalmatch-frontend-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html  # For SPA routing
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - GET
+              - HEAD
+            AllowedHeaders:
+              - '*'
+            MaxAge: 3600
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-frontend
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 Bucket Policy for CloudFront Access
+  FrontendBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref FrontendBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontAccess
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub ${FrontendBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  # ============================================================================
+  # CloudFront Distribution (Task 11.2)
+  # ============================================================================
+
+  # CloudFront Origin Access Control for S3
+  CloudFrontOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${Environment}-vitalmatch-oac
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+        Description: Origin Access Control for VitalMatch Frontend S3 Bucket
+
+  # ACM Certificate for CloudFront (must be in us-east-1)
+  # Note: For production, create certificate manually in us-east-1 and reference it
+  # This is a placeholder - actual certificate should be created separately
+  # CloudFrontCertificate:
+  #   Type: AWS::CertificateManager::Certificate
+  #   Properties:
+  #     DomainName: !Sub ${Environment}.vitalmatch.example.com
+  #     ValidationMethod: DNS
+  #     Tags:
+  #       - Key: Name
+  #         Value: !Sub ${Environment}-vitalmatch-cloudfront-cert
+
+  # Cache Policy for Static Assets
+  StaticAssetsCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub ${Environment}-vitalmatch-static-assets-cache
+        Comment: Cache policy for static assets (CSS, JS, images)
+        DefaultTTL: 86400  # 1 day
+        MaxTTL: 31536000  # 1 year
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  # Cache Policy for HTML (shorter TTL for SPA)
+  HTMLCachePolicy:
+    Type: AWS::CloudFront::CachePolicy
+    Properties:
+      CachePolicyConfig:
+        Name: !Sub ${Environment}-vitalmatch-html-cache
+        Comment: Cache policy for HTML files with shorter TTL
+        DefaultTTL: 300  # 5 minutes
+        MaxTTL: 3600  # 1 hour
+        MinTTL: 0
+        ParametersInCacheKeyAndForwardedToOrigin:
+          EnableAcceptEncodingGzip: true
+          EnableAcceptEncodingBrotli: true
+          CookiesConfig:
+            CookieBehavior: none
+          HeadersConfig:
+            HeaderBehavior: none
+          QueryStringsConfig:
+            QueryStringBehavior: none
+
+  # Response Headers Policy for Security
+  SecurityHeadersPolicy:
+    Type: AWS::CloudFront::ResponseHeadersPolicy
+    Properties:
+      ResponseHeadersPolicyConfig:
+        Name: !Sub ${Environment}-vitalmatch-security-headers
+        Comment: Security headers for VitalMatch frontend
+        SecurityHeadersConfig:
+          StrictTransportSecurity:
+            AccessControlMaxAgeSec: 31536000
+            IncludeSubdomains: true
+            Override: true
+          ContentTypeOptions:
+            Override: true
+          FrameOptions:
+            FrameOption: DENY
+            Override: true
+          XSSProtection:
+            ModeBlock: true
+            Protection: true
+            Override: true
+          ReferrerPolicy:
+            ReferrerPolicy: strict-origin-when-cross-origin
+            Override: true
+        CorsConfig:
+          AccessControlAllowOrigins:
+            Items:
+              - '*'
+          AccessControlAllowHeaders:
+            Items:
+              - '*'
+          AccessControlAllowMethods:
+            Items:
+              - GET
+              - HEAD
+              - OPTIONS
+          AccessControlAllowCredentials: false
+          OriginOverride: true
+
+  # WAF Web ACL for CloudFront (must be in us-east-1)
+  # Note: This creates a separate WAF for CloudFront in CLOUDFRONT scope
+  CloudFrontWebACL:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub ${Environment}-vitalmatch-cloudfront-waf
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      Rules:
+        # AWS Managed Rules - Core Rule Set
+        - Name: AWSManagedRulesCommonRuleSet
+          Priority: 1
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CloudFrontAWSManagedRulesCommonRuleSetMetric
+
+        # AWS Managed Rules - Known Bad Inputs
+        - Name: AWSManagedRulesKnownBadInputsRuleSet
+          Priority: 2
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesKnownBadInputsRuleSet
+          OverrideAction:
+            None: {}
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CloudFrontAWSManagedRulesKnownBadInputsRuleSetMetric
+
+        # Rate Limiting - 2000 requests per 5 minutes per IP
+        - Name: CloudFrontRateLimitRule
+          Priority: 3
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          Action:
+            Block:
+              CustomResponse:
+                ResponseCode: 429
+          VisibilityConfig:
+            SampledRequestsEnabled: true
+            CloudWatchMetricsEnabled: true
+            MetricName: CloudFrontRateLimitMetric
+
+      VisibilityConfig:
+        SampledRequestsEnabled: true
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub ${Environment}VitalMatchCloudFrontWAF
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-cloudfront-waf
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudFront Distribution
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Comment: !Sub ${Environment} VitalMatch Clinical Trial Matcher Frontend
+        Enabled: true
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        PriceClass: PriceClass_100  # Use only North America and Europe edge locations
+        
+        # Origins
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt FrontendBucket.RegionalDomainName
+            OriginAccessControlId: !Ref CloudFrontOriginAccessControl
+            S3OriginConfig: {}
+        
+        # Default Cache Behavior (for HTML and root)
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: true
+          CachePolicyId: !Ref HTMLCachePolicy
+          ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+        
+        # Cache Behaviors for Static Assets
+        CacheBehaviors:
+          # CSS files
+          - PathPattern: '*.css'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          # JavaScript files
+          - PathPattern: '*.js'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          # Image files
+          - PathPattern: '*.jpg'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.jpeg'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.png'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.gif'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.svg'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.ico'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          # Font files
+          - PathPattern: '*.woff'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.woff2'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.ttf'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          - PathPattern: '*.eot'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          # Static assets directory
+          - PathPattern: '/static/*'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+          # Assets directory
+          - PathPattern: '/assets/*'
+            TargetOriginId: S3Origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: !Ref StaticAssetsCachePolicy
+            ResponseHeadersPolicyId: !Ref SecurityHeadersPolicy
+
+        # Custom Error Responses for SPA Routing
+        CustomErrorResponses:
+          # Redirect 404 to index.html for client-side routing
+          - ErrorCode: 404
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 300
+          # Redirect 403 to index.html for client-side routing
+          - ErrorCode: 403
+            ResponseCode: 200
+            ResponsePagePath: /index.html
+            ErrorCachingMinTTL: 300
+
+        # Default Root Object
+        DefaultRootObject: index.html
+
+        # Logging Configuration (optional)
+        Logging:
+          Bucket: !GetAtt CloudFrontLogsBucket.DomainName
+          Prefix: !Sub ${Environment}-cloudfront-logs/
+          IncludeCookies: false
+
+        # SSL/TLS Configuration
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+          # For custom domain, uncomment and configure:
+          # AcmCertificateArn: !Ref CloudFrontCertificate
+          # SslSupportMethod: sni-only
+          # MinimumProtocolVersion: TLSv1.2_2021
+
+        # Associate WAF Web ACL
+        WebACLId: !GetAtt CloudFrontWebACL.Arn
+
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-cloudfront
+        - Key: Environment
+          Value: !Ref Environment
+
+  # S3 Bucket for CloudFront Access Logs
+  CloudFrontLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Environment}-vitalmatch-cloudfront-logs-${AWS::AccountId}
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+            NoncurrentVersionExpirationInDays: 30
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerPreferred
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-vitalmatch-cloudfront-logs
+        - Key: Environment
+          Value: !Ref Environment
+
+  # CloudFront Logs Bucket Policy
+  CloudFrontLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CloudFrontLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowCloudFrontLogging
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub ${CloudFrontLogsBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:aws:cloudfront::${AWS::AccountId}:distribution/${CloudFrontDistribution}
+
+  # ============================================================================
+  # CloudWatch Dashboards (Task 12.1)
+  # ============================================================================
+
+  # Main System Dashboard
+  SystemDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VitalMatch-System-Overview
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum", "label": "Match Trials Invocations"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}],
+                  [".", ".", {"stat": "Sum", "label": "Data Ingestion Invocations"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Invocations",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Count"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Duration", {"stat": "Average", "label": "Match Trials Avg Duration"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}],
+                  ["...", {"stat": "Maximum", "label": "Match Trials Max Duration"}],
+                  [".", ".", {"stat": "Average", "label": "Data Ingestion Avg Duration"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}],
+                  ["...", {"stat": "Maximum", "label": "Data Ingestion Max Duration"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Duration (ms)",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Milliseconds"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Errors", {"stat": "Sum", "label": "Match Trials Errors"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}],
+                  [".", ".", {"stat": "Sum", "label": "Data Ingestion Errors"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Errors",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Count"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "ConcurrentExecutions", {"stat": "Maximum", "label": "Match Trials Concurrent"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}],
+                  [".", ".", {"stat": "Maximum", "label": "Data Ingestion Concurrent"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Concurrent Executions",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Count"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", {"stat": "Sum", "label": "Total Requests"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}],
+                  [".", "4XXError", {"stat": "Sum", "label": "4XX Errors"}],
+                  [".", "5XXError", {"stat": "Sum", "label": "5XX Errors"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "API Gateway Requests",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Count"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "Latency", {"stat": "Average", "label": "Average Latency"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}],
+                  ["...", {"stat": "p99", "label": "P99 Latency"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "API Gateway Latency (ms)",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Milliseconds"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "CPUUtilization", {"stat": "Average", "label": "CPU Utilization"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS CPU Utilization (%)",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Percent",
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "DatabaseConnections", {"stat": "Average", "label": "Active Connections"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS Database Connections",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Count"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "ReadIOPS", {"stat": "Average", "label": "Read IOPS"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}],
+                  [".", "WriteIOPS", {"stat": "Average", "label": "Write IOPS"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS IOPS",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "IOPS"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "FreeStorageSpace", {"stat": "Average", "label": "Free Storage"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "RDS Free Storage Space (Bytes)",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Bytes"
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/WAFV2", "BlockedRequests", {"stat": "Sum", "label": "Blocked Requests"}, {"dimensions": {"Rule": "ALL", "WebACL": "${Environment}-vitalmatch-waf", "Region": "${AWS::Region}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "WAF Blocked Requests",
+                "period": 300,
+                "yAxis": {
+                  "left": {
+                    "label": "Count"
+                  }
+                }
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${Environment}-vitalmatch-match-trials'\n| fields @timestamp, @message\n| filter @message like /ERROR/\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Lambda Errors",
+                "stacked": false
+              }
+            }
+          ]
+        }
+
+  # Lambda Performance Dashboard
+  LambdaDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VitalMatch-Lambda-Performance
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Match Trials - Invocations",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Duration", {"stat": "Average"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}],
+                  ["...", {"stat": "Minimum"}],
+                  ["...", {"stat": "Maximum"}],
+                  ["...", {"stat": "p50"}],
+                  ["...", {"stat": "p90"}],
+                  ["...", {"stat": "p99"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Match Trials - Duration Statistics (ms)",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Errors", {"stat": "Sum"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}],
+                  [".", "Throttles", {"stat": "Sum"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Match Trials - Errors and Throttles",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "ConcurrentExecutions", {"stat": "Maximum"}, {"dimensions": {"FunctionName": "${MatchTrialsFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Match Trials - Concurrent Executions",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Data Ingestion - Invocations",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Duration", {"stat": "Average"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}],
+                  ["...", {"stat": "Maximum"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Data Ingestion - Duration (ms)",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Errors", {"stat": "Sum"}, {"dimensions": {"FunctionName": "${DataIngestionFunction}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Data Ingestion - Errors",
+                "period": 300
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/lambda/${Environment}-vitalmatch-match-trials'\n| fields @timestamp, @duration\n| stats avg(@duration), min(@duration), max(@duration), pct(@duration, 50), pct(@duration, 90), pct(@duration, 99) by bin(5m)",
+                "region": "${AWS::Region}",
+                "title": "Match Trials - Duration Percentiles Over Time",
+                "stacked": false
+              }
+            }
+          ]
+        }
+
+  # API Gateway Dashboard
+  ApiGatewayDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VitalMatch-API-Gateway
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "Count", {"stat": "Sum"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Total API Requests",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "4XXError", {"stat": "Sum"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}],
+                  [".", "5XXError", {"stat": "Sum"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "API Errors (4XX and 5XX)",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "Latency", {"stat": "Average"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}],
+                  ["...", {"stat": "p50"}],
+                  ["...", {"stat": "p90"}],
+                  ["...", {"stat": "p99"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "API Latency Percentiles (ms)",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "IntegrationLatency", {"stat": "Average"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}],
+                  ["...", {"stat": "p99"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Integration Latency (ms)",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/ApiGateway", "CacheHitCount", {"stat": "Sum"}, {"dimensions": {"ApiName": "${Environment}-vitalmatch-api", "Stage": "${Environment}"}}],
+                  [".", "CacheMissCount", {"stat": "Sum"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "API Cache Performance",
+                "period": 300
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '/aws/apigateway/${Environment}-vitalmatch-api'\n| fields @timestamp, status, @message\n| filter status >= 400\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent API Errors (4XX/5XX)",
+                "stacked": false
+              }
+            }
+          ]
+        }
+
+  # RDS Database Dashboard
+  RDSDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VitalMatch-RDS-Database
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "CPUUtilization", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "CPU Utilization (%)",
+                "period": 60,
+                "yAxis": {
+                  "left": {
+                    "min": 0,
+                    "max": 100
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "DatabaseConnections", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}],
+                  ["...", {"stat": "Maximum"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Database Connections",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "ReadIOPS", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}],
+                  [".", "WriteIOPS", {"stat": "Average"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Read/Write IOPS",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "ReadLatency", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}],
+                  [".", "WriteLatency", {"stat": "Average"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Read/Write Latency (seconds)",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "FreeStorageSpace", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Free Storage Space (Bytes)",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "FreeableMemory", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Freeable Memory (Bytes)",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "NetworkReceiveThroughput", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}],
+                  [".", "NetworkTransmitThroughput", {"stat": "Average"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Network Throughput (Bytes/Second)",
+                "period": 60
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/RDS", "ReadThroughput", {"stat": "Average"}, {"dimensions": {"DBInstanceIdentifier": "${TrialDatabase}"}}],
+                  [".", "WriteThroughput", {"stat": "Average"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Disk Throughput (Bytes/Second)",
+                "period": 60
+              }
+            }
+          ]
+        }
+
+  # Custom Metrics Dashboard for Trial Matching
+  CustomMetricsDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub ${Environment}-VitalMatch-Custom-Metrics
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["VitalMatch", "TrialsProcessed", {"stat": "Sum"}, {"dimensions": {"Environment": "${Environment}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Total Trials Processed",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["VitalMatch", "MatchScore", {"stat": "Average"}, {"dimensions": {"Environment": "${Environment}"}}],
+                  ["...", {"stat": "p50"}],
+                  ["...", {"stat": "p90"}],
+                  ["...", {"stat": "p99"}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Match Score Distribution",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["VitalMatch", "HardFilteredTrials", {"stat": "Average"}, {"dimensions": {"Environment": "${Environment}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Average Trials After Hard Filtering",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["VitalMatch", "MatchesReturned", {"stat": "Average"}, {"dimensions": {"Environment": "${Environment}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Average Matches Returned to Users",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["VitalMatch", "BedrockInvocations", {"stat": "Sum"}, {"dimensions": {"Environment": "${Environment}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Bedrock AI Invocations",
+                "period": 300
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["VitalMatch", "DataIngestionTrialsCount", {"stat": "Sum"}, {"dimensions": {"Environment": "${Environment}"}}]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Trials Ingested Per Run",
+                "period": 3600
+              }
+            }
+          ]
+        }
+
 # ============================================================================
 # Outputs
 # ============================================================================
@@ -1390,3 +2723,57 @@ Outputs:
     Value: !Sub https://${TrialMatcherAPI}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
     Export:
       Name: !Sub ${Environment}-VitalMatch-API-Endpoint
+
+  FrontendBucketName:
+    Description: S3 bucket name for frontend static website
+    Value: !Ref FrontendBucket
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-Frontend-Bucket-Name
+
+  FrontendBucketArn:
+    Description: S3 bucket ARN for frontend static website
+    Value: !GetAtt FrontendBucket.Arn
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-Frontend-Bucket-ARN
+
+  FrontendWebsiteURL:
+    Description: S3 static website URL
+    Value: !GetAtt FrontendBucket.WebsiteURL
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-Frontend-Website-URL
+
+  FrontendBucketDomainName:
+    Description: S3 bucket domain name for CloudFront origin
+    Value: !GetAtt FrontendBucket.DomainName
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-Frontend-Bucket-DomainName
+
+  CloudFrontDistributionId:
+    Description: CloudFront Distribution ID
+    Value: !Ref CloudFrontDistribution
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-CloudFront-Distribution-ID
+
+  CloudFrontDistributionDomainName:
+    Description: CloudFront Distribution Domain Name
+    Value: !GetAtt CloudFrontDistribution.DomainName
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-CloudFront-Domain-Name
+
+  CloudFrontURL:
+    Description: CloudFront Distribution URL (primary frontend access point)
+    Value: !Sub https://${CloudFrontDistribution.DomainName}
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-CloudFront-URL
+
+  CloudFrontWebACLArn:
+    Description: CloudFront WAF Web ACL ARN
+    Value: !GetAtt CloudFrontWebACL.Arn
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-CloudFront-WAF-ARN
+
+  CloudFrontLogsBucketName:
+    Description: S3 bucket name for CloudFront access logs
+    Value: !Ref CloudFrontLogsBucket
+    Export:
+      Name: !Sub ${Environment}-VitalMatch-CloudFront-Logs-Bucket-Name
