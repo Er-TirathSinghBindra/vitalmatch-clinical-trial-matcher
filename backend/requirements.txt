@@ -4,7 +4,7 @@
 requests==2.31.0
 
 # PostgreSQL database adapter
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.11
 
 # AWS SDK for Python (usually included in Lambda runtime, but specified for local testing)
 boto3==1.34.0
