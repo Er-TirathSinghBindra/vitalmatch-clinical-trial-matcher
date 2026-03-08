@@ -6,7 +6,7 @@ const API_BASE_URL = import.meta.env.VITE_API_ENDPOINT || 'https://your-api-gate
 // Create axios instance with default config
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 30000, // 30 seconds
+  timeout: 65000, // 65 seconds (API Gateway timeout is 60s + 5s buffer)
   headers: {
     'Content-Type': 'application/json'
   }

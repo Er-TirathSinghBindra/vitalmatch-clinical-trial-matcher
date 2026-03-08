@@ -375,7 +375,7 @@ Resources:
       Handler: match_trials.lambda_handler
       Runtime: python3.13
       MemorySize: 1024
-      Timeout: 30
+      Timeout: 60
       Role: !GetAtt MatchTrialsLambdaRole.Arn
       # NO VpcConfig - Lambda runs outside VPC with internet access (same as Data Ingestion Lambda)
       Environment:
@@ -905,12 +905,7 @@ Resources:
         Type: AWS_PROXY
         IntegrationHttpMethod: POST
         Uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MatchTrialsFunction.Arn}/invocations
-        IntegrationResponses:
-          - StatusCode: 200
-            ResponseParameters:
-              method.response.header.Access-Control-Allow-Origin: "'*'"
-              method.response.header.Access-Control-Allow-Headers: "'Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'"
-              method.response.header.Access-Control-Allow-Methods: "'POST,OPTIONS'"
+        TimeoutInMillis: 60000  # 60 seconds (1 minute)
 
   # OPTIONS /match-trials Method (for CORS preflight)
   MatchTrialsOptionsMethod:
