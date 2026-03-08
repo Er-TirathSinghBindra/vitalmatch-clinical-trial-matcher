@@ -1,0 +1,3 @@
+{
+  "body": "{\"patient_profile\":{\"condition\":\"asthma\",\"age\":35,\"gender\":\"Female\",\"location\":\"Chicago, IL\",\"distance_miles\":75,\"medical_history\":\"Moderate persistent asthma since childhood. Currently using albuterol inhaler as needed and fluticasone/salmeterol twice daily. Occasional exacerbations requiring oral steroids.\"}}"
+}

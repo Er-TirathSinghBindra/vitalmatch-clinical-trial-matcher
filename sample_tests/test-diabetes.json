@@ -1,0 +1,3 @@
+{
+  "body": "{\"patient_profile\":{\"condition\":\"diabetes\",\"age\":55,\"gender\":\"Male\",\"location\":\"New York, NY\",\"distance_miles\":100,\"medical_history\":\"Type 2 diabetes diagnosed 10 years ago. Currently on metformin 1000mg twice daily. HbA1c last measured at 7.8%. No complications. Hypertension controlled with lisinopril.\"}}"
+}

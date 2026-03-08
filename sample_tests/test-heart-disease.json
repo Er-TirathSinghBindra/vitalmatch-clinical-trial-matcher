@@ -1,0 +1,3 @@
+{
+  "body": "{\"patient_profile\":{\"condition\":\"heart disease\",\"age\":62,\"gender\":\"Male\",\"location\":\"Los Angeles, CA\",\"distance_miles\":50,\"medical_history\":\"Coronary artery disease with stent placement 2 years ago. Currently on aspirin, atorvastatin, and metoprolol. Ejection fraction 45%. No recent cardiac events.\"}}"
+}
