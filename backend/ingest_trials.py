@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import boto3
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any
 
 from data_ingestion.clinicaltrials_api_client import ClinicalTrialsAPIClient
@@ -41,23 +41,31 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     
     try:
         # Get configuration from environment variables
-        rds_proxy_endpoint = os.environ.get('RDS_PROXY_ENDPOINT')
+        aurora_endpoint = os.environ.get('AURORA_CLUSTER_ENDPOINT')
         db_name = os.environ.get('DB_NAME', 'trials_db')
-        db_user = os.environ.get('DB_USER', 'vitalmatch_admin')
-        db_password = os.environ.get('DB_PASSWORD')
+        db_secret_arn = os.environ.get('DB_SECRET_ARN')
         sns_alert_topic = os.environ.get('SNS_ALERT_TOPIC')
         
         # Validate required environment variables
-        if not rds_proxy_endpoint:
-            raise ValueError("RDS_PROXY_ENDPOINT environment variable not set")
-        if not db_password:
-            raise ValueError("DB_PASSWORD environment variable not set")
+        if not aurora_endpoint:
+            raise ValueError("AURORA_CLUSTER_ENDPOINT environment variable not set")
+        if not db_secret_arn:
+            raise ValueError("DB_SECRET_ARN environment variable not set")
+        
+        # Get database credentials from Secrets Manager
+        logger.info("Retrieving database credentials from Secrets Manager...")
+        secrets_client = boto3.client('secretsmanager')
+        secret_response = secrets_client.get_secret_value(SecretId=db_secret_arn)
+        secret = json.loads(secret_response['SecretString'])
+        db_user = secret['username']
+        db_password = secret['password']
+        logger.info(f"Credentials retrieved for user: {db_user}")
         
         # Initialize components
         api_client = ClinicalTrialsAPIClient()
         parser = TrialParser()
         storage = DatabaseStorage(
-            host=rds_proxy_endpoint,
+            host=aurora_endpoint,
             database=db_name,
             user=db_user,
             password=db_password
@@ -69,37 +77,74 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             raise Exception("Failed to connect to database")
         logger.info("Database connection successful")
         
-        # Fetch trials updated in the last 24 hours
-        logger.info("Fetching trials from ClinicalTrials.gov API...")
-        raw_trials = api_client.fetch_recent_trials(days=1)
-        logger.info(f"Fetched {len(raw_trials)} trials from API")
+        # Fetch trials day-by-day for better progress tracking and memory management
+        days_to_fetch = int(os.environ.get('INGESTION_DAYS', '7'))
+        logger.info(f"Starting day-by-day ingestion for last {days_to_fetch} days...")
         
-        # Parse trials
-        logger.info("Parsing trial data...")
-        parsed_trials = parser.parse_trials(raw_trials)
-        logger.info(f"Successfully parsed {len(parsed_trials)} trials")
+        total_fetched = 0
+        total_parsed = 0
+        total_inserted = 0
+        total_updated = 0
+        total_failed = 0
         
-        # Store trials in database
-        logger.info("Storing trials in database...")
-        storage_result = storage.store_trials(parsed_trials)
-        logger.info(f"Storage complete: {storage_result}")
+        # Process each day separately with specific date ranges
+        for day_offset in range(days_to_fetch):
+            # Calculate date range for this specific day
+            # day_offset=0 means today, day_offset=1 means yesterday, etc.
+            start_date = datetime.utcnow() - timedelta(days=day_offset + 1)
+            end_date = datetime.utcnow() - timedelta(days=day_offset)
+            
+            logger.info(f"Processing day {day_offset + 1}/{days_to_fetch} ({start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')})...")
+            
+            try:
+                # Fetch trials updated within this specific day range
+                raw_trials = api_client.fetch_trials(
+                    updated_since=start_date,
+                    updated_until=end_date,
+                    max_pages=10
+                )
+                logger.info(f"  Fetched {len(raw_trials)} trials for day {day_offset + 1}")
+                
+                if len(raw_trials) == 0:
+                    logger.info(f"  No trials found for day {day_offset + 1}, skipping...")
+                    continue
+                
+                # Parse trials
+                parsed_trials = parser.parse_trials(raw_trials)
+                logger.info(f"  Parsed {len(parsed_trials)} trials for day {day_offset + 1}")
+                
+                # Store trials in database
+                storage_result = storage.store_trials(parsed_trials)
+                logger.info(f"  Stored {storage_result['inserted']} new, {storage_result['updated']} updated for day {day_offset + 1}")
+                
+                # Accumulate metrics
+                total_fetched += len(raw_trials)
+                total_parsed += len(parsed_trials)
+                total_inserted += storage_result['inserted']
+                total_updated += storage_result['updated']
+                total_failed += storage_result['failed']
+                
+            except Exception as day_error:
+                logger.error(f"  Error processing day {day_offset + 1}: {day_error}")
+                total_failed += 1
+                continue
         
         # Calculate metrics
         end_time = datetime.utcnow()
         duration_seconds = (end_time - start_time).total_seconds()
         
         metrics = {
-            'trials_fetched': len(raw_trials),
-            'trials_parsed': len(parsed_trials),
-            'trials_inserted': storage_result['inserted'],
-            'trials_updated': storage_result['updated'],
-            'trials_failed': storage_result['failed'],
+            'trials_fetched': total_fetched,
+            'trials_parsed': total_parsed,
+            'trials_inserted': total_inserted,
+            'trials_updated': total_updated,
+            'trials_failed': total_failed,
             'duration_seconds': duration_seconds,
             'total_trials_in_db': storage.get_trial_count()
         }
         
         # Log metrics
-        logger.info(f"Ingestion metrics: {json.dumps(metrics)}")
+        logger.info(f"Ingestion complete! Metrics: {json.dumps(metrics)}")
         
         # Publish metrics to CloudWatch
         publish_metrics(metrics)

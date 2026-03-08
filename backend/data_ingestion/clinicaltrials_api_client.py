@@ -41,7 +41,8 @@ class ClinicalTrialsAPIClient:
         query: Optional[str] = None,
         page_size: int = DEFAULT_PAGE_SIZE,
         max_pages: Optional[int] = None,
-        updated_since: Optional[datetime] = None
+        updated_since: Optional[datetime] = None,
+        updated_until: Optional[datetime] = None
     ) -> List[Dict[str, Any]]:
         """
         Fetch trials from ClinicalTrials.gov API with pagination
@@ -51,6 +52,7 @@ class ClinicalTrialsAPIClient:
             page_size: Number of records per page (max 1000)
             max_pages: Maximum number of pages to fetch (None = all)
             updated_since: Only fetch trials updated since this date
+            updated_until: Only fetch trials updated until this date (requires updated_since)
             
         Returns:
             List of trial dictionaries
@@ -63,7 +65,7 @@ class ClinicalTrialsAPIClient:
         page_count = 0
         
         # Build query parameters
-        params = self._build_query_params(query, page_size, updated_since)
+        params = self._build_query_params(query, page_size, updated_since, updated_until)
         
         logger.info(f"Starting trial fetch with query: {query}, page_size: {page_size}")
         
@@ -104,7 +106,8 @@ class ClinicalTrialsAPIClient:
         self,
         query: Optional[str],
         page_size: int,
-        updated_since: Optional[datetime]
+        updated_since: Optional[datetime],
+        updated_until: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """Build query parameters for API request"""
         params = {
@@ -115,11 +118,18 @@ class ClinicalTrialsAPIClient:
         # Build query string
         if updated_since:
             # Format: YYYY-MM-DD
-            date_str = updated_since.strftime('%Y-%m-%d')
+            start_date_str = updated_since.strftime('%Y-%m-%d')
             query_parts = []
             if query:
                 query_parts.append(query)
-            query_parts.append(f'AREA[LastUpdatePostDate]RANGE[{date_str},MAX]')
+            
+            # If updated_until is provided, use date range; otherwise use open-ended range
+            if updated_until:
+                end_date_str = updated_until.strftime('%Y-%m-%d')
+                query_parts.append(f'AREA[LastUpdatePostDate]RANGE[{start_date_str},{end_date_str}]')
+            else:
+                query_parts.append(f'AREA[LastUpdatePostDate]RANGE[{start_date_str},MAX]')
+            
             params['query.term'] = ' AND '.join(query_parts)
         elif query:
             params['query.term'] = query

@@ -41,7 +41,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         API Gateway response with match results
     """
     start_time = time.time()
-    request_id = context.request_id if context else 'local'
+    request_id = context.aws_request_id if context else 'local'
     
     logger.info(f"Request {request_id}: Starting trial matching")
     

@@ -52,8 +52,8 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # Public Subnet for NAT Gateway
-  PublicSubnetA:
+  # Public Subnet for NAT Gateway (keep original name to avoid conflicts)
+  PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
@@ -117,10 +117,10 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  PublicSubnetARouteTableAssociation:
+  PublicSubnetRouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
-      SubnetId: !Ref PublicSubnetA
+      SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref PublicRouteTable
 
   PublicSubnetBRouteTableAssociation:
@@ -205,26 +205,26 @@ Resources:
   # RDS PostgreSQL Database with RDS Proxy (Task 1.2)
   # ============================================================================
 
-  # Database Subnet Group
+  # Database Subnet Group (Public subnets for external Lambda access)
   DBSubnetGroup:
     Type: AWS::RDS::DBSubnetGroup
     Properties:
-      DBSubnetGroupName: !Sub ${Environment}-vitalmatch-db-subnet-group
-      DBSubnetGroupDescription: Subnet group for VitalMatch RDS database
+      DBSubnetGroupName: !Sub ${Environment}-vitalmatch-public-db-subnet-group
+      DBSubnetGroupDescription: Public subnet group for VitalMatch Aurora (allows external Lambda access)
       SubnetIds:
-        - !Ref PublicSubnetA
+        - !Ref PublicSubnet
         - !Ref PublicSubnetB
       Tags:
         - Key: Name
-          Value: !Sub ${Environment}-vitalmatch-db-subnet-group
+          Value: !Sub ${Environment}-vitalmatch-public-db-subnet-group
 
   # Aurora Serverless v2 Cluster
-  AuroraCluster:
+  AuroraClusterV2:
     Type: AWS::RDS::DBCluster
     DeletionPolicy: Snapshot
     UpdateReplacePolicy: Snapshot
     Properties:
-      DBClusterIdentifier: !Sub ${Environment}-vitalmatch-aurora
+      DBClusterIdentifier: !Sub ${Environment}-vitalmatch-aurora-v2
       Engine: aurora-postgresql
       EngineVersion: '17.5'
       DatabaseName: trials_db
@@ -251,12 +251,12 @@ Resources:
           Value: !Ref Environment
 
   # Aurora Serverless v2 Instance
-  AuroraInstance:
+  AuroraInstanceV2:
     Type: AWS::RDS::DBInstance
     Properties:
-      DBInstanceIdentifier: !Sub ${Environment}-vitalmatch-aurora-instance
+      DBInstanceIdentifier: !Sub ${Environment}-vitalmatch-aurora-instance-v2
       Engine: aurora-postgresql
-      DBClusterIdentifier: !Ref AuroraCluster
+      DBClusterIdentifier: !Ref AuroraClusterV2
       DBInstanceClass: db.serverless
       PubliclyAccessible: true
       Tags:
@@ -297,7 +297,7 @@ Resources:
     Properties:
       Name: !Sub /${Environment}/vitalmatch/db/endpoint
       Type: String
-      Value: !GetAtt AuroraCluster.Endpoint.Address
+      Value: !GetAtt AuroraClusterV2.Endpoint.Address
       Description: Aurora cluster endpoint for VitalMatch
 
   # ============================================================================
@@ -385,8 +385,8 @@ Resources:
           - !Ref PrivateSubnetB
       Environment:
         Variables:
-          AURORA_CLUSTER_ENDPOINT: !GetAtt AuroraCluster.Endpoint.Address
-          AURORA_READER_ENDPOINT: !GetAtt AuroraCluster.ReadEndpoint.Address
+          AURORA_CLUSTER_ENDPOINT: !GetAtt AuroraClusterV2.Endpoint.Address
+          AURORA_READER_ENDPOINT: !GetAtt AuroraClusterV2.ReadEndpoint.Address
           DB_NAME: trials_db
           DB_SECRET_ARN: !Ref DBSecret
           DB_PORT: '5432'
@@ -519,17 +519,18 @@ Resources:
       CodeUri: backend/
       Handler: ingest_trials.lambda_handler
       Runtime: python3.13
-      MemorySize: 512
-      Timeout: 300
+      MemorySize: 2048
+      Timeout: 900
       Role: !GetAtt DataIngestionLambdaRole.Arn
       # NO VpcConfig - Lambda runs outside VPC with internet access
       Environment:
         Variables:
-          AURORA_CLUSTER_ENDPOINT: !GetAtt AuroraCluster.Endpoint.Address
+          AURORA_CLUSTER_ENDPOINT: !GetAtt AuroraClusterV2.Endpoint.Address
           DB_NAME: trials_db
           DB_SECRET_ARN: !Ref DBSecret
           DB_PORT: '5432'
           SNS_ALERT_TOPIC: !Ref SystemAlertTopic
+          INGESTION_DAYS: '7'
       Events:
         DailySchedule:
           Type: Schedule
@@ -612,7 +613,7 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Ref AuroraCluster
+          Value: !Ref AuroraClusterV2
       AlarmActions:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
@@ -632,7 +633,7 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Ref AuroraCluster
+          Value: !Ref AuroraClusterV2
       AlarmActions:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
@@ -652,7 +653,7 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Ref AuroraCluster
+          Value: !Ref AuroraClusterV2
       AlarmActions:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
@@ -672,7 +673,7 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Ref AuroraCluster
+          Value: !Ref AuroraClusterV2
       AlarmActions:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
@@ -692,7 +693,7 @@ Resources:
       ComparisonOperator: GreaterThanThreshold
       Dimensions:
         - Name: DBClusterIdentifier
-          Value: !Ref AuroraCluster
+          Value: !Ref AuroraClusterV2
       AlarmActions:
         - !Ref SystemAlertTopic
       TreatMissingData: notBreaching
@@ -2310,11 +2311,11 @@ Outputs:
     Export:
       Name: !Sub ${Environment}-VitalMatch-VPC-ID
 
-  PublicSubnetAId:
+  PublicSubnetId:
     Description: Public Subnet A ID
-    Value: !Ref PublicSubnetA
+    Value: !Ref PublicSubnet
     Export:
-      Name: !Sub ${Environment}-VitalMatch-PublicSubnetA-ID
+      Name: !Sub ${Environment}-VitalMatch-PublicSubnet-ID
 
   PublicSubnetBId:
     Description: Public Subnet B ID
@@ -2348,13 +2349,13 @@ Outputs:
 
   AuroraClusterEndpoint:
     Description: Aurora Serverless v2 cluster endpoint
-    Value: !GetAtt AuroraCluster.Endpoint.Address
+    Value: !GetAtt AuroraClusterV2.Endpoint.Address
     Export:
       Name: !Sub ${Environment}-VitalMatch-Aurora-Endpoint
 
   AuroraReaderEndpoint:
     Description: Aurora Serverless v2 reader endpoint
-    Value: !GetAtt AuroraCluster.ReadEndpoint.Address
+    Value: !GetAtt AuroraClusterV2.ReadEndpoint.Address
     Export:
       Name: !Sub ${Environment}-VitalMatch-Aurora-Reader-Endpoint
 
@@ -2477,3 +2478,5 @@ Outputs:
     Value: !Ref CloudFrontLogsBucket
     Export:
       Name: !Sub ${Environment}-VitalMatch-CloudFront-Logs-Bucket-Name
+
+
