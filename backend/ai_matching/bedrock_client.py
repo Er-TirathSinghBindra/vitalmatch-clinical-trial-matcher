@@ -39,7 +39,7 @@ class BedrockClient:
     """
     
     # Model configuration
-    MODEL_ID = "anthropic.claude-3-sonnet-20240229-v1:0"
+    MODEL_ID = os.environ.get('BEDROCK_MODEL_ID', 'amazon.nova-pro-v1:0')
     MAX_RESPONSE_TOKENS = 500
     TEMPERATURE = 0.3  # Lower temperature for more consistent medical analysis
     
@@ -180,18 +180,34 @@ Respond with ONLY the JSON object, no additional text.
             BedrockError: If API call fails
         """
         try:
-            # Prepare request body for Claude 3 Sonnet
-            request_body = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": self.MAX_RESPONSE_TOKENS,
-                "temperature": self.TEMPERATURE,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
+            # Determine request format based on model
+            if 'nova' in self.MODEL_ID.lower():
+                # Amazon Nova models use the converse API format
+                request_body = {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [{"text": prompt}]
+                        }
+                    ],
+                    "inferenceConfig": {
+                        "maxTokens": self.MAX_RESPONSE_TOKENS,
+                        "temperature": self.TEMPERATURE
                     }
-                ]
-            }
+                }
+            else:
+                # Claude models use anthropic format
+                request_body = {
+                    "anthropic_version": "bedrock-2023-05-31",
+                    "max_tokens": self.MAX_RESPONSE_TOKENS,
+                    "temperature": self.TEMPERATURE,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ]
+                }
             
             logger.debug(f"Invoking Bedrock model: {self.MODEL_ID}")
             
@@ -256,16 +272,22 @@ Respond with ONLY the JSON object, no additional text.
             BedrockError: If response format is invalid
         """
         try:
-            # Extract content from Claude response
-            if 'content' not in response_body:
-                raise BedrockError("Missing 'content' in Bedrock response")
+            # Extract content based on model type
+            text_content = ""
             
-            content_blocks = response_body['content']
-            if not content_blocks or len(content_blocks) == 0:
-                raise BedrockError("Empty content in Bedrock response")
+            if 'output' in response_body:
+                # Nova model response format
+                output = response_body['output']
+                if 'message' in output:
+                    content_blocks = output['message'].get('content', [])
+                    if content_blocks and len(content_blocks) > 0:
+                        text_content = content_blocks[0].get('text', '')
+            elif 'content' in response_body:
+                # Claude model response format
+                content_blocks = response_body['content']
+                if content_blocks and len(content_blocks) > 0:
+                    text_content = content_blocks[0].get('text', '')
             
-            # Get the text content
-            text_content = content_blocks[0].get('text', '')
             if not text_content:
                 raise BedrockError("No text content in Bedrock response")
             

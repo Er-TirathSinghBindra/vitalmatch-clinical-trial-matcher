@@ -327,14 +327,14 @@ Resources:
               Service: lambda.amazonaws.com
             Action: sts:AssumeRole
       ManagedPolicyArns:
-        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
         - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
       Policies:
         - PolicyName: MatchTrialsPolicy
           PolicyDocument:
             Version: '2012-10-17'
             Statement:
-              # RDS Proxy connection
+              # RDS IAM authentication (connects directly to Aurora, not proxy)
               - Effect: Allow
                 Action:
                   - rds-db:connect
@@ -377,12 +377,7 @@ Resources:
       MemorySize: 1024
       Timeout: 30
       Role: !GetAtt MatchTrialsLambdaRole.Arn
-      VpcConfig:
-        SecurityGroupIds:
-          - !Ref LambdaSecurityGroup
-        SubnetIds:
-          - !Ref PrivateSubnetA
-          - !Ref PrivateSubnetB
+      # NO VpcConfig - Lambda runs outside VPC with internet access (same as Data Ingestion Lambda)
       Environment:
         Variables:
           AURORA_CLUSTER_ENDPOINT: !GetAtt AuroraClusterV2.Endpoint.Address
@@ -390,7 +385,7 @@ Resources:
           DB_NAME: trials_db
           DB_SECRET_ARN: !Ref DBSecret
           DB_PORT: '5432'
-          BEDROCK_MODEL_ID: anthropic.claude-3-sonnet-20240229-v1:0
+          BEDROCK_MODEL_ID: amazon.nova-pro-v1:0
       Tracing: Active
       Tags:
         Name: !Sub ${Environment}-vitalmatch-match-trials

@@ -149,11 +149,11 @@ class HardFilterEngine:
         query_parts = ["SELECT * FROM trials WHERE 1=1"]
         params = []
         
-        # Filter by condition (exact match)
+        # Filter by condition (fuzzy match using ILIKE for partial matching)
         if patient.condition:
-            query_parts.append("AND LOWER(condition) = LOWER(%s)")
-            params.append(patient.condition)
-            filters_applied.append("condition")
+            query_parts.append("AND LOWER(condition) LIKE LOWER(%s)")
+            params.append(f'%{patient.condition}%')
+            filters_applied.append("condition_fuzzy")
         
         # Filter by age range
         if patient.age is not None:
@@ -174,21 +174,15 @@ class HardFilterEngine:
             params.append(patient.gender)
             filters_applied.append("gender")
         
-        # Filter by location (if coordinates provided)
-        if patient.latitude is not None and patient.longitude is not None:
-            # Use location text search as fallback
-            # In production, would use PostGIS for proper distance calculation
+        # Filter by location - make it optional and more flexible
+        if patient.location:
+            # Use simple ILIKE for more flexible location matching
+            # This will match if location contains any part of the search term
             query_parts.append(
-                "AND location IS NOT NULL"
+                "AND (location IS NULL OR LOWER(location) LIKE LOWER(%s))"
             )
-            filters_applied.append("location")
-        elif patient.location:
-            # Fuzzy location match using full-text search
-            query_parts.append(
-                "AND to_tsvector('english', location) @@ plainto_tsquery('english', %s)"
-            )
-            params.append(patient.location)
-            filters_applied.append("location_text")
+            params.append(f'%{patient.location}%')
+            filters_applied.append("location_flexible")
         
         # Combine query parts
         query_str = " ".join(query_parts)

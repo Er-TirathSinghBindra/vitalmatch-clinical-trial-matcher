@@ -119,7 +119,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             total_trials=hard_filter_result.total_count,
             hard_filtered_count=hard_filter_result.filtered_count,
             matches_returned=len(match_results),
-            match_scores=[result.match_percentage / 100.0 for result in match_results]
+            match_scores=[result.match_score / 100.0 for result in match_results]
         )
         
         return {
@@ -256,17 +256,23 @@ def initialize_hard_filter_engine() -> HardFilterEngine:
         Exception: If initialization fails
     """
     # Get database connection parameters from environment variables
-    db_host = os.environ.get('RDS_PROXY_ENDPOINT')
+    db_host = os.environ.get('AURORA_CLUSTER_ENDPOINT') or os.environ.get('AURORA_READER_ENDPOINT')
     db_name = os.environ.get('DB_NAME', 'trials_db')
-    db_user = os.environ.get('DB_USER', 'postgres')
-    db_password = os.environ.get('DB_PASSWORD')
+    db_secret_arn = os.environ.get('DB_SECRET_ARN')
     db_port = int(os.environ.get('DB_PORT', '5432'))
     
     if not db_host:
-        raise Exception("RDS_PROXY_ENDPOINT environment variable not set")
+        raise Exception("AURORA_CLUSTER_ENDPOINT or AURORA_READER_ENDPOINT environment variable not set")
     
-    if not db_password:
-        raise Exception("DB_PASSWORD environment variable not set")
+    if not db_secret_arn:
+        raise Exception("DB_SECRET_ARN environment variable not set")
+    
+    # Get database credentials from Secrets Manager
+    secrets_client = boto3.client('secretsmanager')
+    secret_response = secrets_client.get_secret_value(SecretId=db_secret_arn)
+    secret = json.loads(secret_response['SecretString'])
+    db_user = secret['username']
+    db_password = secret['password']
     
     return HardFilterEngine(
         host=db_host,
