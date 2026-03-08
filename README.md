@@ -2,12 +2,51 @@
 
 An intelligent eligibility engine that matches patients with relevant clinical trials using AWS serverless architecture and AI-powered analysis.
 
+## What is VitalMatch?
+
+VitalMatch helps patients find clinical trials they're eligible for by analyzing their medical profile against trial criteria. It combines rule-based filtering with AI-powered medical text analysis to provide accurate, ranked matches.
+
+## Key Features
+
+- **Smart Matching**: Hybrid approach using SQL filtering + AI analysis
+- **Real-time Data**: Integrates with ClinicalTrials.gov API
+- **Secure & Scalable**: AWS serverless architecture with enterprise security
+- **User-friendly**: React-based web interface with CloudFront CDN
+- **Cost-optimized**: Hybrid Lambda design saves ~$384/year on infrastructure
+
+## Technology Stack
+
+**Frontend**: React, Vite, CloudFront, S3  
+**Backend**: AWS Lambda (Python), API Gateway, RDS PostgreSQL  
+**AI/ML**: Amazon Bedrock (Claude models)  
+**Security**: WAF, VPC, IAM, Secrets Manager  
+**Data**: ClinicalTrials.gov API
+
+## Quick Start
+
+```bash
+# 1. Install prerequisites
+aws --version && sam --version
+
+# 2. Deploy infrastructure
+sam build && sam deploy --guided
+
+# 3. Deploy frontend
+./scripts/deploy-frontend.sh dev
+
+# 4. Access application
+# Use CloudFront URL from deployment output
+```
+
+See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed instructions.
+
 ## Architecture Overview
 
 VitalMatch uses a hybrid architecture combining:
 - **SQL-based hard filtering** for age, gender, and location criteria
 - **AI-powered soft matching** using Amazon Bedrock for medical text analysis
 - **Serverless AWS infrastructure** for scalability and cost efficiency
+- **Hybrid Lambda approach**: Data ingestion outside VPC (internet access), matching inside VPC (database access)
 
 ## Infrastructure Components
 
@@ -32,95 +71,70 @@ VitalMatch uses a hybrid architecture combining:
 - CloudWatch logging for blocked requests
 - SNS alerts for suspicious patterns
 
-## Prerequisites
+## Project Structure
 
-Before deploying, ensure you have:
-
-1. **AWS CLI** installed and configured
-   ```bash
-   aws --version
-   aws configure
-   ```
-
-2. **AWS SAM CLI** installed
-   ```bash
-   sam --version
-   ```
-   Install from: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/install-sam-cli.html
-
-3. **AWS Account** with appropriate permissions:
-   - VPC and networking resources
-   - RDS database creation
-   - IAM role creation
-   - CloudWatch and WAF configuration
-
-## Deployment Instructions
-
-### Step 1: Validate the Template
-
-```bash
-sam validate --lint
+```
+├── backend/              # Python Lambda functions and AI matching logic
+├── frontend/             # React application
+├── database/             # PostgreSQL schema and migrations
+├── docs/                 # Detailed documentation
+├── template.yaml         # AWS SAM infrastructure template
+└── samconfig.toml        # SAM deployment configuration
 ```
 
-### Step 2: Build the Application
+## Development
+
+### Local Setup
+
+```bash
+# Backend tests
+cd backend
+pip install -r requirements.txt
+pytest
+
+# Frontend development
+cd frontend
+npm install
+npm run dev
+```
+
+### Running Tests
+
+```bash
+# Backend unit tests
+pytest backend/tests/
+
+# Frontend tests
+cd frontend && npm test
+```
+
+## Deployment
+
+### Prerequisites
+
+- AWS CLI v2.x+ configured with credentials
+- AWS SAM CLI v1.x+
+- Node.js 18+ and npm (for frontend)
+- IAM permissions for CloudFormation, VPC, RDS, Lambda, S3, CloudFront
+
+### Infrastructure Deployment
 
 ```bash
 sam build
-```
-
-### Step 3: Deploy the Infrastructure
-
-For first-time deployment:
-
-```bash
 sam deploy --guided
 ```
 
-You will be prompted for:
-- **Stack Name**: e.g., `vitalmatch-dev`
-- **AWS Region**: e.g., `us-east-1`
-- **Environment**: `dev`, `staging`, or `prod`
-- **DBUsername**: Database master username (default: `vitalmatch_admin`)
-- **DBPassword**: Database master password (minimum 8 characters)
-
-The guided deployment will save your configuration to `samconfig.toml` for future deployments.
-
-### Step 4: Subsequent Deployments
-
-After the initial guided deployment:
+### Frontend Deployment
 
 ```bash
-sam deploy
+# Windows
+.\scripts\deploy-frontend.ps1 -Environment dev
+
+# Linux/Mac
+./scripts/deploy-frontend.sh dev
 ```
 
-### Step 5: Verify Deployment
-
-Check the CloudFormation stack outputs:
-
-```bash
-aws cloudformation describe-stacks \
-  --stack-name vitalmatch-dev \
-  --query 'Stacks[0].Outputs'
-```
-
-Key outputs include:
-- `VPCId`: VPC identifier
-- `RDSEndpoint`: Direct RDS endpoint
-- `RDSProxyEndpoint`: RDS Proxy endpoint (use this for Lambda connections)
-- `WebACLArn`: WAF Web ACL ARN
-- `SystemAlertTopicArn`: SNS topic for alerts
-
-## Environment-Specific Configurations
-
-### Development Environment
-- RDS Instance: `db.t3.micro`
-- Multi-AZ: Disabled
-- Lower cost for testing
-
-### Production Environment
-- RDS Instance: `db.t3.medium`
-- Multi-AZ: Enabled for high availability
-- Enhanced monitoring and alerting
+See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for complete instructions.
 
 ## Security Considerations
 
@@ -165,20 +179,32 @@ aws sns subscribe \
 
 ## Cost Estimation
 
-### Development Environment (~$20-70/month)
+### Development (~$20-40/month)
 - RDS db.t3.micro: ~$15/month
-- ~~NAT Gateway: ~$32/month~~ **REMOVED - Saves $32/month!**
 - Data transfer: ~$5-10/month
-- CloudWatch Logs: ~$5/month
+- CloudWatch: ~$5/month
 
-### Production Environment (~$170-470/month)
+### Production (~$140-290/month)
 - RDS db.t3.medium Multi-AZ: ~$120/month
-- ~~NAT Gateway: ~$32/month~~ **REMOVED - Saves $32/month!**
-- Data transfer: ~$20-50/month
-- Lambda executions: ~$10-50/month (1000 daily users)
-- CloudWatch and monitoring: ~$10-20/month
+- Lambda + API Gateway: ~$10-50/month
+- CloudFront + S3: ~$10-20/month
 
-**Cost Savings**: Removed NAT Gateway saves ~$32/month (~$384/year) by using hybrid Lambda approach
+**Cost Savings**: Hybrid Lambda design eliminates NAT Gateway (~$384/year savings)
+
+## Documentation
+
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) - Complete deployment guide
+- [INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) - Architecture details
+- [COST_OPTIMIZATION.md](docs/COST_OPTIMIZATION.md) - Cost management strategies
+- [PRE_DEPLOYMENT_CHECKLIST.md](docs/PRE_DEPLOYMENT_CHECKLIST.md) - Pre-flight checks
+
+## Troubleshooting
+
+**RDS Connection Issues**: Use RDS Proxy endpoint, verify security groups  
+**WAF Blocking Traffic**: Check CloudWatch logs, adjust rules  
+**Frontend Not Loading**: Verify CloudFront invalidation completed
+
+See [DEPLOYMENT.md](docs/DEPLOYMENT.md) for detailed troubleshooting.
 
 ## Cleanup
 
@@ -188,45 +214,7 @@ To delete all resources:
 sam delete --stack-name vitalmatch-dev
 ```
 
-**Warning**: This will delete:
-- VPC and all networking resources
-- RDS database (a final snapshot will be created)
-- All CloudWatch logs
-- WAF configuration
-
-## Next Steps
-
-After infrastructure deployment:
-
-1. **Database Schema**: Run migration scripts to create the trials table
-2. **Lambda Functions**: Deploy data ingestion and matching functions
-3. **API Gateway**: Set up REST API endpoints
-4. **Frontend**: Deploy React application to S3/CloudFront
-
-## Troubleshooting
-
-### RDS Connection Issues
-- Verify Lambda is in the correct VPC and subnets
-- Check security group rules allow Lambda → RDS on port 5432
-- Use RDS Proxy endpoint, not direct RDS endpoint
-
-### Hybrid Lambda Architecture
-- Data Ingestion Lambda runs outside VPC (has internet access for ClinicalTrials.gov API)
-- Match Trials Lambda runs inside VPC (connects to RDS via RDS Proxy)
-- This eliminates the need for NAT Gateway, saving ~$32/month
-- RDS is publicly accessible but secured with IAM authentication and security groups
-
-### WAF False Positives
-- Review WAF logs in CloudWatch
-- Adjust rule sensitivity if needed
-- Add custom rules to allow legitimate traffic
-
-## Support
-
-For issues or questions:
-- Review CloudWatch logs for error details
-- Check AWS CloudFormation events for deployment issues
-- Verify IAM permissions for all services
+This removes VPC, RDS (with final snapshot), CloudWatch logs, WAF, S3, and CloudFront.
 
 ## License
 
