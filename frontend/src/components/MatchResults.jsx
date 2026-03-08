@@ -84,7 +84,7 @@ const TrialMatchCard = ({ match, rank, onViewDetails }) => {
     location = 'Location not specified'
   } = match
 
-  const matchPercentage = Math.round(match_score * 100)
+  const matchPercentage = Math.round(match_score)
 
   const getMatchClass = (percentage) => {
     if (percentage >= 85) return 'excellent'

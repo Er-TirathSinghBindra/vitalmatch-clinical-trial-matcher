@@ -356,7 +356,7 @@ def format_response(
         match = {
             'trial_id': result.trial_id,
             'title': result.title,
-            'match_score': result.match_percentage,
+            'match_score': result.match_score,
             'explanation': result.explanation,
             'key_criteria': result.key_criteria,
             'location': result.location
