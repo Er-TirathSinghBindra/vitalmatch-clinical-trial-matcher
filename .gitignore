@@ -1,4 +1,6 @@
 .vscode
+.kiro
+schema_deployment
 
 # AWS SAM
 .aws-sam/
@@ -43,3 +45,5 @@ secrets.json
 credentials.json
 *.pem
 *.key
+
+notes

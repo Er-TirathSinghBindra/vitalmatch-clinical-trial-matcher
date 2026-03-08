@@ -14,9 +14,10 @@ VitalMatch uses a hybrid architecture combining:
 ### Network Layer (VPC)
 - VPC with CIDR 10.0.0.0/16
 - Two private subnets in different AZs (10.0.1.0/24, 10.0.2.0/24)
-- Public subnet for NAT Gateway
+- Public subnet for internet gateway
 - Security groups for Lambda and RDS with least privilege access
 - VPC Flow Logs for network monitoring
+- **Hybrid Lambda approach**: Data ingestion Lambda outside VPC (internet access), Match Lambda in VPC (RDS access)
 
 ### Database Layer
 - RDS PostgreSQL 15 with Multi-AZ (production)
@@ -129,10 +130,14 @@ Key outputs include:
 - Use IAM authentication for Lambda connections
 
 ### Network Security
-- Lambda functions have no public IP addresses
-- RDS database is not publicly accessible
-- All traffic between Lambda and RDS stays within VPC
-- NAT Gateway provides controlled outbound internet access
+- Match Lambda functions have no public IP addresses (in VPC)
+- Data Ingestion Lambda outside VPC uses IAM authentication for RDS access
+- RDS database is publicly accessible but secured with:
+  - IAM database authentication (no password-based access)
+  - Security group restricts access to Lambda and specific IPs
+  - Encryption in transit (TLS required)
+  - Encryption at rest (KMS)
+- All traffic between Match Lambda and RDS stays within VPC
 
 ### WAF Protection
 - Protects against common web attacks (SQLi, XSS)
@@ -160,18 +165,20 @@ aws sns subscribe \
 
 ## Cost Estimation
 
-### Development Environment (~$50-100/month)
+### Development Environment (~$20-70/month)
 - RDS db.t3.micro: ~$15/month
-- NAT Gateway: ~$32/month
+- ~~NAT Gateway: ~$32/month~~ **REMOVED - Saves $32/month!**
 - Data transfer: ~$5-10/month
 - CloudWatch Logs: ~$5/month
 
-### Production Environment (~$200-500/month)
+### Production Environment (~$170-470/month)
 - RDS db.t3.medium Multi-AZ: ~$120/month
-- NAT Gateway: ~$32/month
+- ~~NAT Gateway: ~$32/month~~ **REMOVED - Saves $32/month!**
 - Data transfer: ~$20-50/month
 - Lambda executions: ~$10-50/month (1000 daily users)
 - CloudWatch and monitoring: ~$10-20/month
+
+**Cost Savings**: Removed NAT Gateway saves ~$32/month (~$384/year) by using hybrid Lambda approach
 
 ## Cleanup
 
@@ -203,9 +210,11 @@ After infrastructure deployment:
 - Check security group rules allow Lambda → RDS on port 5432
 - Use RDS Proxy endpoint, not direct RDS endpoint
 
-### NAT Gateway Costs
-- NAT Gateway charges for data transfer
-- Consider VPC endpoints for AWS services to reduce costs
+### Hybrid Lambda Architecture
+- Data Ingestion Lambda runs outside VPC (has internet access for ClinicalTrials.gov API)
+- Match Trials Lambda runs inside VPC (connects to RDS via RDS Proxy)
+- This eliminates the need for NAT Gateway, saving ~$32/month
+- RDS is publicly accessible but secured with IAM authentication and security groups
 
 ### WAF False Positives
 - Review WAF logs in CloudWatch
