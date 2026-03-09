@@ -197,6 +197,7 @@ aws sns subscribe \
 - [INFRASTRUCTURE.md](docs/INFRASTRUCTURE.md) - Architecture details
 - [COST_OPTIMIZATION.md](docs/COST_OPTIMIZATION.md) - Cost management strategies
 - [PRE_DEPLOYMENT_CHECKLIST.md](docs/PRE_DEPLOYMENT_CHECKLIST.md) - Pre-flight checks
+- [TEST_SAMPLES_SUMMARY.md](docs/TEST_SAMPLES_SUMMARY.md) - Test patient profiles for Frontend Testing
 
 ## Troubleshooting
 
